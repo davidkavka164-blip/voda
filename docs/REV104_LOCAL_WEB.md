@@ -61,3 +61,13 @@ Položky rezervy domácnosti zůstávají mimo web a ochrana čerpadla pracuje
 s hladinou. Jednotky si data neposílají.
 
 - [ESP32 #2 – OTA REV106](../ota/ESP32_2_REV106_CORE3_BENCH.bin)
+
+## REV107 – přehled ESP32 #1
+
+Studna má vyšší a o něco širší nákres. V horní části webu jsou aktuální
+měření, STOP a start přepouštění, ruční ovládání ventilů a stavy ochran.
+Historie je pod ovládáním. Samostatný blok **Konfigurace a servis** na
+konci obsahuje ochranné meze, kontrolu přítoku, nastavení studny, kalibraci,
+síť a OTA. Ovládací formuláře zůstaly připojené ke stejným handlerům.
+
+- [ESP32 #1 – OTA REV107](../ota/ESP32_1_REV107_CORE3_BENCH.bin)

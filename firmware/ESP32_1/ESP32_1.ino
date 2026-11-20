@@ -305,6 +305,7 @@ String pageStart(const char* title) {
     h += "<meta name='viewport' content='width=device-width,initial-scale=1'>";
     h += "<title>Home Water Controller</title><style>body{font:16px Arial;max-width:900px;margin:20px auto;padding:0 14px;background:#f4f6f8;color:#17202a}section{background:white;padding:16px;margin:14px 0;border-radius:10px}input,textarea{box-sizing:border-box;width:100%;padding:9px;margin:5px 0 12px}button{padding:10px 16px}small{color:#555}.warn{color:#9b1c1c}</style>";
     h += HWC::WATER_LEVEL_SKETCH_CSS;
+    h += "<style>.level-vessel.well{height:156px;width:76px}</style>";
     h += "</head><body><h1>Home Water Controller</h1><h2>";
     h += title; h += "</h2>"; return h;
 }
@@ -866,24 +867,6 @@ void updateTransferControl(uint32_t nowMs) {
 void handleRoot() {
     if (!requireWebAuth()) return;
     String h = pageStart("ESP32 #1 – studna");
-    h += "<section><h3>Stav</h3><p>Ethernet W5500: ";
-    const EthernetStartup startup = ethernetStartup.load();
-    if (startup == EthernetStartup::Ready && ETH.linkUp() && ETH.hasIP()) {
-        h += "DHCP adresa přidělena</p><p>IP adresa: <b>" + ETH.localIP().toString() + "</b></p>";
-    } else {
-        if (startup == EthernetStartup::Pending) h += "Probíhá inicializace W5500";
-        else if (startup == EthernetStartup::Failed) h += "Inicializace W5500 selhala";
-        else h += ETH.linkUp() ? "Čeká se na DHCP" : "Fyzický link je odpojen";
-        h += "</p>";
-    }
-    h += "<p>Ovládací web je dostupný přes Ethernet i Wi-Fi. REV105 Core 3 – stolní zkouška.</p>";
-    h += apMode ? "<p>Servisní AP je zapnutý.</p>" : "<p>Servisní AP je vypnutý.</p>";
-    if (apMode) {
-        h += "<p>Adresa AP: " + WiFi.softAPIP().toString() + "<br>AP: <b>" + htmlEscape(apName) + "</b></p>";
-    }
-    h += "<p>Průměr studny: "; h += String(wellGeometry.internalDiameterCm,1);
-    h += " cm; využitelná hloubka: "; h += String(wellGeometry.usableDepthCm,1); h += " cm</p><p>Kalibračních bodů: ";
-    h += String(wellCalibration.pointCount); h += "</p><p class='warn'>Ruční i automatický transfer ovládá ventily přes relé GPIO 16/17. Čerpadla běžně spouští a vypíná vlastní tlaková automatika; ESP32 přes samostatná bezpečnostní relé povoluje nebo přerušuje napájení čerpadel (studna GPIO 25, dolní nádrž GPIO 32).</p></section>";
     const uint32_t levelNow = millis();
     const bool wellLevelValid = HWC::sampleIsFresh(haveWellReading, levelNow, lastWellReadingMs, 5000U) &&
         lastWellReading.result.status == HWC::SENSOR_MATH_OK &&
@@ -936,6 +919,45 @@ void handleRoot() {
          (lowerSensorConfigState == HWC::SENSOR_CONFIG_MISSING_PROVISIONAL ? "CHYBÍ OVĚŘENÉ NASTAVENÍ – výška není použitelná pro ochranu" :
           (lowerSensorConfigState == HWC::SENSOR_CONFIG_INVALID_PRESENT ? "POŠKOZENÉ ELEKTRICKÉ NASTAVENÍ – výška není použitelná pro ochranu" : "NVS NEDOSTUPNÉ – elektrické nastavení není ověřeno"));
     h += "</p></section>";
+    h += "<section><h3>Automatický transfer vody</h3><p class='warn'>Automatický transfer ovládá příslušný ventil přes relé GPIO16/17. Čerpadlo nespíná; jeho provoz zajišťuje vlastní tlaková automatika. Bez zpětné vazby ventilu a průtokoměru nelze potvrdit fyzickou polohu ventilu ani skutečný průtok. Přenesený objem je pouze odhad podle změny hladiny dolní nádrže.</p>";
+    h += "<form method='post' action='/transfer-stop'><button type='submit'>Zastavit transfer / zavřít ventil</button></form>";
+    if (transferRestartGuard.state() == HWC::TRANSFER_RESTART_INTERRUPTED ||
+        transferRestartGuard.state() == HWC::TRANSFER_RESTART_RESULT_PENDING) {
+        h += "<p class='warn'><b>POZOR: Předchozí transfer nebyl po restartu bezpečně uzavřen.</b> Automatické pokračování je zakázáno. ID požadavku: ";
+        h += String(transferRestartGuard.record().requestId);
+        h += ". Po kontrole fyzického stavu nádrží a ventilů potvrďte zaznamenání přerušení.</p><form method='post' action='/transfer-recovery-ack'><button type='submit'>Potvrdit přerušení a odblokovat přípravu</button></form>";
+    } else if (transferRestartGuard.state() == HWC::TRANSFER_RESTART_LOCKED) {
+        h += "<p class='warn'><b>Transfery jsou zablokované:</b> žurnál obnovy není dostupný nebo je poškozený. Automatický zápis je zakázán.</p>";
+    }
+    h += "<p>Stav: <b>"; h += transferStateText(transferOutputs.state); h += "</b>; výsledek: "; h += transferReasonText(transferOutputs.endReason); h += ".</p>";
+    h += "<p>Cílová hladina dolní nádrže: "; h += String(transferOutputs.targetLowerLevelCm, 1); h += " cm; odhad změny objemu podle snímače dolní nádrže: "; h += String(transferOutputs.estimatedTransferredLiters, 1); h += " l.</p>";
+    h += "<p>Příkaz relé: ";
+    if (transferOutputs.valveCommand == HWC::VALVE_OPEN_WELL_TO_LOWER) h += "studna → dolní nádrž";
+    else if (transferOutputs.valveCommand == HWC::VALVE_OPEN_UPPER_TO_LOWER) h += "horní → dolní nádrž";
+    else h += "obě relé vypnuta – povel CLOSE_ALL";
+    h += "</p><p>Stav inicializace reléového výstupu: "; h += manualValveRelayOutputReady ? "READY" : "FAULT / BLOKOVÁNO";
+    h += "</p>";
+    h += "<form method='post' action='/transfer-start'><label>Zdroj</label><select name='source'><option value='well'>Studna → dolní nádrž</option><option value='upper'>Horní nádrž → dolní nádrž</option></select><label>Požadovaný přírůstek dolní nádrže (l)</label><input name='liters' type='number' min='1' max='7000' step='1' value='500' required><label>Časový limit transferu (minuty)</label><input name='timeout' type='number' min='1' max='120' step='1' value='10' required><button type='submit'>Spustit automatický transfer</button></form><small>Transfer vyžaduje platnou hladinu a volnou kapacitu dolní nádrže i připravený výstup ventilu. Při přepouštění ze studny se navíc kontroluje hladina studny a její ochranné meze. Při přepouštění z horní nádrže se sleduje skutečný přítok do dolní nádrže. Horní čerpadlo má samostatnou ochranu na ESP32 #2. Při poruše nebo neplatném měření potřebném pro danou trasu se ventil zavře.</small></section>";
+    h += "<section><h3>Ruční ovládání ventilů – servis / nouze</h3>";
+    h += "<p class='warn'>Ruční i automatický transfer ovládá ventily přes relé GPIO 16/17. Čerpadla běžně spouští a vypíná vlastní tlaková automatika; ESP32 přes samostatná bezpečnostní relé povoluje nebo přerušuje napájení čerpadel (studna GPIO 25, dolní nádrž GPIO 32).</p>";
+    h += "<p>Servisní režim slouží k vědomému testu a údržbě při funkčních čidlech. Nouzový režim je určen pouze pro poruchu relevantního čidla. Po výslovném potvrzení fyzické kontroly dovoluje ručně zapnout zvolený ventil a ponechat jej otevřený až do povelu STOP. Nezadává se množství vody a neprobíhá automatické ukončení podle hladiny; kontrolu a včasné vypnutí zajišťuje obsluha. Oba režimy jsou po restartu vypnuté.</p>";
+    h += "<p>Stav: <b>";
+    if (!manualValveControl.active()) h += "vypnuto";
+    else if (manualValveControl.operatingMode() == HWC::MANUAL_VALVE_OPERATING_SERVICE) h += "SERVISNÍ REŽIM AKTIVNÍ";
+    else h += "NOUZOVÝ RUČNÍ REŽIM AKTIVNÍ";
+    h += "</b><br>";
+    h += manualValveCommandText(manualValveControl.command()); h += "</p>";
+    h += "<p class='warn'>Ruční příkazy jsou předávány relé GPIO16/17. Zobrazený povel nepotvrzuje fyzickou polohu ventilu; bez koncového spínače není zpětná vazba.</p>";
+    if (!manualValveControl.active()) {
+        h += "<form method='post' action='/manual-valve-mode'><input type='hidden' name='mode' value='service'><button type='submit'>Aktivovat servisní režim (funkční čidla)</button></form>";
+        h += "<form method='post' action='/manual-valve-mode'><input type='hidden' name='mode' value='emergency'><label><input style='width:auto' type='checkbox' name='physical' value='yes' required> Potvrzuji, že jsem si vědom, že nouzový režim obchází běžné kontroly hladin pro ventil, a před otevřením ventilu jsem fyzicky ověřil situaci u nádrží.</label><button type='submit'>Aktivovat nouzové ruční ovládání</button></form>";
+    } else {
+        h += "<form method='post' action='/manual-valve-command'><input type='hidden' name='command' value='well'><button type='submit'>ZAPNOUT ventil: studna → dolní nádrž</button></form>";
+        h += "<form method='post' action='/manual-valve-command'><input type='hidden' name='command' value='upper'><button type='submit'>ZAPNOUT ventil: horní → dolní nádrž</button></form>";
+        h += "<form method='post' action='/manual-valve-command'><input type='hidden' name='command' value='close'><button type='submit'>STOP – CLOSE_ALL</button></form>";
+        h += "<form method='post' action='/manual-valve-mode'><input type='hidden' name='mode' value='disable'><button type='submit'>Ukončit nouzový ruční režim</button></form>";
+    }
+    h += "<small>Nouzový režim lze aktivovat jen při poruše relevantního čidla; při plně funkčním systému není dostupný. Nezadává se požadovaný objem ani časový cíl: ZAPNOUT ponechá vybraný ventil otevřený až do STOP. Obsluha musí průběžně fyzicky sledovat hladiny a sama včas zastavit přítok. Nouzový režim ignoruje měření dolní nádrže, běžné transferové prahy a hysterezi. Pokud je čidlo studny platné, otevření studniční trasy stále respektuje existující povolení ochrany studničního čerpadla; při neplatném čidle se tato čidlová ochrana nedá vyhodnotit a odpovědnost přebírá obsluha. Ochrana horního čerpadla běží místně na ESP32 #2 nezávisle na ručním ventilu; při výpadku samotného ESP32 #2 není dostupná. Každé čerpadlo má samostatné bezpečnostní relé a vlastní nouzové povolení při softwarové poruše své ochrany; nouzové otevření ventilu samo o sobě čerpadlo nepovoluje. Nouzové povolení čerpadla vyžaduje samostatné fyzické potvrzení hladiny v části ochrany příslušného čerpadla. Servisní režim zachovává běžné ventilové ochrany. Reléový výstup musí být inicializovaný; aktivní může být vždy jen jeden směr. Před změnou směru použijte STOP. Po skončení nouzového zásahu ověřte stav čidel před návratem k automatickému provozu.</small></section>";
     h += "<section><h3>Ochrana čerpadla studny</h3>";
     if (wellProtectionConfigConfigured) {
         h += "<p>Transferové minimum: "; h += String(wellProtectionConfig.transferMinimumLevelCm, 1); h += " cm; kritické vypnutí: ";
@@ -949,13 +971,6 @@ void handleRoot() {
     h += "</p><p>Povel bezpečnostnímu relé: ";
     h += !wellPumpSafetyRelayReady ? "CHYBA / NEPŘIPRAVENO" : (wellPumpSafetyRelayOutput.energized() ? "POVOLIT MOTOR" : "ODPOJIT MOTOR");
     h += "</p><p class='warn'>Nouzový režim po fyzickém ověření hladiny obchází softwarovou ochranu hladiny, její kritickou blokaci i chybu konfigurace/NVS. Obsluha přebírá průběžnou kontrolu hladiny. Neobchází jistič, tepelnou/elektrickou ochranu motoru ani fyzickou připravenost bezpečnostního relé. Po restartu se vypne.</p>";
-    h += "<form method='post' action='/protection-config'><h4>Hladinové meze (cm)</h4><label>Transferové minimum (neodpojuje samo o sobě čerpadlo)</label><input name='transferMin' type='number' min='0' max='2000' step='0.1' required value='";
-    if (protectionConfigLoaded) h += String(wellProtectionConfig.transferMinimumLevelCm, 1);
-    h += "'><label>Kritická hladina pro ochranu čerpadla</label><input name='criticalTrip' type='number' min='0' max='2000' step='0.1' required value='";
-    if (protectionConfigLoaded) h += String(wellProtectionConfig.criticalTripLevelCm, 1);
-    h += "'><label>Obnovovací hladina</label><input name='recovery' type='number' min='0' max='2000' step='0.1' required value='";
-    if (protectionConfigLoaded) h += String(wellProtectionConfig.recoveryLevelCm, 1);
-    h += "'><button type='submit'>Uložit bezpečnostní meze</button></form>";
     if (!pumpProtectionState.emergencyModeActive) {
         h += "<form method='post' action='/pump-emergency'><input type='hidden' name='mode' value='enable'><label><input style='width:auto' type='checkbox' name='physical' value='yes' required> Potvrzuji, že jsem fyzicky zkontroloval hladinu studny a je bezpečná pro provoz čerpadla. Přebírám průběžnou kontrolu hladiny.</label><button type='submit'>NOUZOVĚ POVOLIT STUDNIČNÍ ČERPADLO</button></form>";
     }
@@ -982,17 +997,29 @@ void handleRoot() {
     } else {
         h += "<form method='post' action='/lower-pump-emergency'><input type='hidden' name='mode' value='enable'><label><input style='width:auto' type='checkbox' name='physical' value='yes' required> Potvrzuji, že jsem fyzicky zkontroloval hladinu dolní nádrže a je bezpečná pro provoz čerpadla. Přebírám průběžnou kontrolu hladiny.</label><button type='submit'>NOUZOVĚ POVOLIT ČERPADLO DOLNÍ NÁDRŽE</button></form>";
     }
-    h += "<form method='post' action='/lower-pump-protection-config'><h4>Bezpečnostní meze (cm)</h4>";
-    h += "<label>Minimální hladina – vypnutí čerpadla</label><input name='minimum' type='number' min='0' max='121' step='0.1' required value='";
-    if (lowerPumpConfigConfigured) h += String(lowerPumpConfig.minimumLevelCm, 1);
-    h += "'><label>Hystereze – zvýšení hladiny pro opětovné povolení</label><input name='hysteresis' type='number' min='0.1' max='121' step='0.1' required value='";
-    if (lowerPumpConfigConfigured) h += String(lowerPumpConfig.hysteresisCm, 1);
-    h += "'><button type='submit'>Uložit ochranu čerpadla dolní nádrže</button></form>";
-    h += "<p><small>Pracovní minimum nádrže 11 cm je pouze informativní údaj o běžně využitelné hloubce. Nemá žádný vliv na povolení ani blokování čerpadla. Ochranu řídí výhradně výše nastavená minimální hladina a hystereze.</small></p>";
     h += "<p>Výstup bezpečnostního relé: ";
     h += !lowerPumpSafetyRelayReady ? "CHYBA / NEPŘIPRAVENO" : (lowerPumpSafetyRelayOutput.energized() ? "POVEL POVOLIT MOTOR" : "POVEL ODPOJIT MOTOR"); h += "</p>";
     h += "<p class='warn'>Nouzový režim po fyzickém ověření hladiny obchází softwarovou ochranu hladiny, kritickou blokaci i chybu konfigurace/NVS. Obsluha přebírá průběžnou kontrolu hladiny. Neobchází jistič, tepelnou/elektrickou ochranu motoru ani fyzickou připravenost bezpečnostního relé. Po restartu se vypne.</p>";
     h += "</section>";
+    h += "<section><h3>Poslední uložené transfery</h3>";
+    if (transferHistory.snapshot().count == 0) h += "<p>Zatím bez záznamu.</p>";
+    else {
+        const HWC::TransferHistorySnapshot& history = transferHistory.snapshot();
+        for (uint8_t n = 0; n < history.count && n < 5; ++n) {
+            const uint8_t index = history.count < HWC::TRANSFER_HISTORY_CAPACITY
+                ? static_cast<uint8_t>(history.count - 1U - n)
+                : static_cast<uint8_t>((history.nextIndex + HWC::TRANSFER_HISTORY_CAPACITY - 1U - n) % HWC::TRANSFER_HISTORY_CAPACITY);
+            const HWC::TransferHistoryEntry& e = history.entries[index];
+            h += "<p>#" + String(e.requestId) + " – ";
+            h += e.source == HWC::TRANSFER_SOURCE_WELL ? "studna → dolní" : "horní → dolní";
+            h += ", požadavek " + String(e.requestedLiters, 0) + " l, odhad " + String(e.estimatedTransferredLiters, 1) + " l, ";
+            h += transferStateText(static_cast<HWC::TransferState>(e.terminalState));
+            h += " (";
+            h += transferReasonText(static_cast<HWC::TransferEndReason>(e.endReason));
+            h += ")</p>";
+        }
+    }
+    h += "<small>Historie ukládá výsledky řízení; objem je odhad ze změny hladiny dolní nádrže, nikoli měření průtokoměrem.</small></section>";
     h += "<section><h3>Denní přítok studny</h3>";
     bool todayValid = false;
     const uint32_t todayKey = currentLocalDateKey(todayValid);
@@ -1020,70 +1047,38 @@ void handleRoot() {
     h += "</table><small>Součet zahrnuje jen kladné změny odhadovaného objemu. Geometrický odhad není přesné měření zásoby.</small></section>";
     h += "<section><h3>Horní nádrž / ESP32 #2</h3>";
     h += "<p>ESP32 #2 samostatně hlídá horní čerpadlo proti chodu nasucho a měří teplotu vody. ESP32 #1 řídí ventily a sleduje přítok do dolní nádrže.</p></section>";
-    h += "<section><h3>Automatický transfer vody</h3><p class='warn'>Automatický transfer ovládá příslušný ventil přes relé GPIO16/17. Čerpadlo nespíná; jeho provoz zajišťuje vlastní tlaková automatika. Bez zpětné vazby ventilu a průtokoměru nelze potvrdit fyzickou polohu ventilu ani skutečný průtok. Přenesený objem je pouze odhad podle změny hladiny dolní nádrže.</p>";
-    if (transferRestartGuard.state() == HWC::TRANSFER_RESTART_INTERRUPTED ||
-        transferRestartGuard.state() == HWC::TRANSFER_RESTART_RESULT_PENDING) {
-        h += "<p class='warn'><b>POZOR: Předchozí transfer nebyl po restartu bezpečně uzavřen.</b> Automatické pokračování je zakázáno. ID požadavku: ";
-        h += String(transferRestartGuard.record().requestId);
-        h += ". Po kontrole fyzického stavu nádrží a ventilů potvrďte zaznamenání přerušení.</p><form method='post' action='/transfer-recovery-ack'><button type='submit'>Potvrdit přerušení a odblokovat přípravu</button></form>";
-    } else if (transferRestartGuard.state() == HWC::TRANSFER_RESTART_LOCKED) {
-        h += "<p class='warn'><b>Transfery jsou zablokované:</b> žurnál obnovy není dostupný nebo je poškozený. Automatický zápis je zakázán.</p>";
-    }
-    h += "<p>Stav: <b>"; h += transferStateText(transferOutputs.state); h += "</b>; výsledek: "; h += transferReasonText(transferOutputs.endReason); h += ".</p>";
-    h += "<p>Cílová hladina dolní nádrže: "; h += String(transferOutputs.targetLowerLevelCm, 1); h += " cm; odhad změny objemu podle snímače dolní nádrže: "; h += String(transferOutputs.estimatedTransferredLiters, 1); h += " l.</p>";
-    h += "<p>Příkaz relé: ";
-    if (transferOutputs.valveCommand == HWC::VALVE_OPEN_WELL_TO_LOWER) h += "studna → dolní nádrž";
-    else if (transferOutputs.valveCommand == HWC::VALVE_OPEN_UPPER_TO_LOWER) h += "horní → dolní nádrž";
-    else h += "obě relé vypnuta – povel CLOSE_ALL";
-    h += "</p><p>Stav inicializace reléového výstupu: "; h += manualValveRelayOutputReady ? "READY" : "FAULT / BLOKOVÁNO";
-    h += "</p><h4>Poslední uložené transfery</h4>";
-    if (transferHistory.snapshot().count == 0) h += "<p>Zatím bez záznamu.</p>";
-    else {
-        const HWC::TransferHistorySnapshot& history = transferHistory.snapshot();
-        for (uint8_t n = 0; n < history.count && n < 5; ++n) {
-            const uint8_t index = history.count < HWC::TRANSFER_HISTORY_CAPACITY
-                ? static_cast<uint8_t>(history.count - 1U - n)
-                : static_cast<uint8_t>((history.nextIndex + HWC::TRANSFER_HISTORY_CAPACITY - 1U - n) % HWC::TRANSFER_HISTORY_CAPACITY);
-            const HWC::TransferHistoryEntry& e = history.entries[index];
-            h += "<p>#" + String(e.requestId) + " – ";
-            h += e.source == HWC::TRANSFER_SOURCE_WELL ? "studna → dolní" : "horní → dolní";
-            h += ", požadavek " + String(e.requestedLiters, 0) + " l, odhad " + String(e.estimatedTransferredLiters, 1) + " l, ";
-            h += transferStateText(static_cast<HWC::TransferState>(e.terminalState));
-            h += " (";
-            h += transferReasonText(static_cast<HWC::TransferEndReason>(e.endReason));
-            h += ")</p>";
-        }
-    }
-    h += "<small>Historie ukládá výsledky řízení; objem je odhad ze změny hladiny dolní nádrže, nikoli měření průtokoměrem.</small>";
+    h += "<h2>Konfigurace a servis</h2>";
+    h += "<section><h3>Meze ochrany studničního čerpadla</h3>";
+    h += "<form method='post' action='/protection-config'><h4>Hladinové meze (cm)</h4><label>Transferové minimum (neodpojuje samo o sobě čerpadlo)</label><input name='transferMin' type='number' min='0' max='2000' step='0.1' required value='";
+    if (protectionConfigLoaded) h += String(wellProtectionConfig.transferMinimumLevelCm, 1);
+    h += "'><label>Kritická hladina pro ochranu čerpadla</label><input name='criticalTrip' type='number' min='0' max='2000' step='0.1' required value='";
+    if (protectionConfigLoaded) h += String(wellProtectionConfig.criticalTripLevelCm, 1);
+    h += "'><label>Obnovovací hladina</label><input name='recovery' type='number' min='0' max='2000' step='0.1' required value='";
+    if (protectionConfigLoaded) h += String(wellProtectionConfig.recoveryLevelCm, 1);
+    h += "'><button type='submit'>Uložit bezpečnostní meze</button></form>";
+    h += "</section><section><h3>Meze ochrany čerpadla dolní nádrže</h3>";
+    h += "<form method='post' action='/lower-pump-protection-config'><h4>Bezpečnostní meze (cm)</h4>";
+    h += "<label>Minimální hladina – vypnutí čerpadla</label><input name='minimum' type='number' min='0' max='121' step='0.1' required value='";
+    if (lowerPumpConfigConfigured) h += String(lowerPumpConfig.minimumLevelCm, 1);
+    h += "'><label>Hystereze – zvýšení hladiny pro opětovné povolení</label><input name='hysteresis' type='number' min='0.1' max='121' step='0.1' required value='";
+    if (lowerPumpConfigConfigured) h += String(lowerPumpConfig.hysteresisCm, 1);
+    h += "'><button type='submit'>Uložit ochranu čerpadla dolní nádrže</button></form>";
+    h += "<p><small>Pracovní minimum nádrže 11 cm je pouze informativní údaj o běžně využitelné hloubce. Nemá žádný vliv na povolení ani blokování čerpadla. Ochranu řídí výhradně nastavená minimální hladina a hystereze.</small></p>";
+    h += "</section>";
     h += "<section><h3>Ochrana horního → dolního transferu: kontrola přítoku</h3>";
     h += "<p>Počáteční čas čekání na první přírůstek a maximální doba bez dalšího přírůstku. Nejde o celkový časový limit transferu.</p>";
     h += "<p>Stav nastavení: <b>"; h += inflowWatchdogSettingsLoaded ? "uloženo a ověřeno v NVS" : (inflowWatchdogSettingsStorageFault ? "CHYBA úložiště – transfer blokován" : "neuloženo – použijte počáteční hodnoty a uložte") ; h += "</b></p>";
     h += "<form method='post' action='/inflow-watchdog-config'><label>Čas na zahájení přítoku (sekundy, 1–3600)</label><input name='startup_seconds' type='number' min='1' max='3600' step='1' required value='" + String(inflowWatchdogSettings.startupGraceSeconds) + "'><label>Maximální doba bez dalšího přítoku (sekundy, 1–3600)</label><input name='no_progress_seconds' type='number' min='1' max='3600' step='1' required value='" + String(inflowWatchdogSettings.noProgressTimeoutSeconds) + "'><button type='submit'>Uložit časové limity</button></form>";
     h += "<small>Počáteční hodnoty 30 s / 30 s jsou pouze orientační, nikoli ověřené provozní hodnoty. Změna se projeví od dalšího transferu. Minimální objemový přírůstek a celkový timeout transferu jsou samostatné parametry.</small></section>";
-    h += "<form method='post' action='/transfer-start'><label>Zdroj</label><select name='source'><option value='well'>Studna → dolní nádrž</option><option value='upper'>Horní nádrž → dolní nádrž</option></select><label>Požadovaný přírůstek dolní nádrže (l)</label><input name='liters' type='number' min='1' max='7000' step='1' value='500' required><label>Časový limit transferu (minuty)</label><input name='timeout' type='number' min='1' max='120' step='1' value='10' required><button type='submit'>Spustit automatický transfer</button></form><form method='post' action='/transfer-stop'><button type='submit'>Zastavit transfer / zavřít ventil</button></form><small>Transfer vyžaduje platnou hladinu a volnou kapacitu dolní nádrže i připravený výstup ventilu. Při přepouštění ze studny se navíc kontroluje hladina studny a její ochranné meze. Při přepouštění z horní nádrže se sleduje skutečný přítok do dolní nádrže. Horní čerpadlo má samostatnou ochranu na ESP32 #2. Při poruše nebo neplatném měření potřebném pro danou trasu se ventil zavře.</small></section>";
-    h += "<section><h3>Ruční ovládání ventilů – servis / nouze</h3>";
-    h += "<p>Servisní režim slouží k vědomému testu a údržbě při funkčních čidlech. Nouzový režim je určen pouze pro poruchu relevantního čidla. Po výslovném potvrzení fyzické kontroly dovoluje ručně zapnout zvolený ventil a ponechat jej otevřený až do povelu STOP. Nezadává se množství vody a neprobíhá automatické ukončení podle hladiny; kontrolu a včasné vypnutí zajišťuje obsluha. Oba režimy jsou po restartu vypnuté.</p>";
-    h += "<p>Stav: <b>";
-    if (!manualValveControl.active()) h += "vypnuto";
-    else if (manualValveControl.operatingMode() == HWC::MANUAL_VALVE_OPERATING_SERVICE) h += "SERVISNÍ REŽIM AKTIVNÍ";
-    else h += "NOUZOVÝ RUČNÍ REŽIM AKTIVNÍ";
-    h += "</b><br>";
-    h += manualValveCommandText(manualValveControl.command()); h += "</p>";
-    h += "<p class='warn'>Ruční příkazy jsou předávány relé GPIO16/17. Zobrazený povel nepotvrzuje fyzickou polohu ventilu; bez koncového spínače není zpětná vazba.</p>";
-    if (!manualValveControl.active()) {
-        h += "<form method='post' action='/manual-valve-mode'><input type='hidden' name='mode' value='service'><button type='submit'>Aktivovat servisní režim (funkční čidla)</button></form>";
-        h += "<form method='post' action='/manual-valve-mode'><input type='hidden' name='mode' value='emergency'><label><input style='width:auto' type='checkbox' name='physical' value='yes' required> Potvrzuji, že jsem si vědom, že nouzový režim obchází běžné kontroly hladin pro ventil, a před otevřením ventilu jsem fyzicky ověřil situaci u nádrží.</label><button type='submit'>Aktivovat nouzové ruční ovládání</button></form>";
-    } else {
-        h += "<form method='post' action='/manual-valve-command'><input type='hidden' name='command' value='well'><button type='submit'>ZAPNOUT ventil: studna → dolní nádrž</button></form>";
-        h += "<form method='post' action='/manual-valve-command'><input type='hidden' name='command' value='upper'><button type='submit'>ZAPNOUT ventil: horní → dolní nádrž</button></form>";
-        h += "<form method='post' action='/manual-valve-command'><input type='hidden' name='command' value='close'><button type='submit'>STOP – CLOSE_ALL</button></form>";
-        h += "<form method='post' action='/manual-valve-mode'><input type='hidden' name='mode' value='disable'><button type='submit'>Ukončit nouzový ruční režim</button></form>";
-    }
-    h += "<small>Nouzový režim lze aktivovat jen při poruše relevantního čidla; při plně funkčním systému není dostupný. Nezadává se požadovaný objem ani časový cíl: ZAPNOUT ponechá vybraný ventil otevřený až do STOP. Obsluha musí průběžně fyzicky sledovat hladiny a sama včas zastavit přítok. Nouzový režim ignoruje měření dolní nádrže, běžné transferové prahy a hysterezi. Pokud je čidlo studny platné, otevření studniční trasy stále respektuje existující povolení ochrany studničního čerpadla; při neplatném čidle se tato čidlová ochrana nedá vyhodnotit a odpovědnost přebírá obsluha. Ochrana horního čerpadla běží místně na ESP32 #2 nezávisle na ručním ventilu; při výpadku samotného ESP32 #2 není dostupná. Každé čerpadlo má samostatné bezpečnostní relé a vlastní nouzové povolení při softwarové poruše své ochrany; nouzové otevření ventilu samo o sobě čerpadlo nepovoluje. Nouzové povolení čerpadla vyžaduje samostatné fyzické potvrzení hladiny v části ochrany příslušného čerpadla. Servisní režim zachovává běžné ventilové ochrany. Reléový výstup musí být inicializovaný; aktivní může být vždy jen jeden směr. Před změnou směru použijte STOP. Po skončení nouzového zásahu ověřte stav čidel před návratem k automatickému provozu.</small></section>";
     h += "<section><h3>Rozměry studny</h3><form method='post' action='/geometry'>";
     h += "<label>Vnitřní průměr (cm)</label><input name='diameter' type='number' min='20' max='500' step='0.1' required value='" + String(wellGeometry.internalDiameterCm,1) + "'>";
     h += "<label>Využitelná hloubka (cm)</label><input name='depth' type='number' min='20' max='2000' step='0.1' required value='" + String(wellGeometry.usableDepthCm,1) + "'>";
     h += "<button type='submit'>Uložit rozměry</button></form><small>Změna rozměrů nemění naměřenou objemovou kalibraci.</small></section>";
+    h += "<section><h3>Uložené rozměry a kalibrace</h3>";
+    h += "<p>Průměr studny: "; h += String(wellGeometry.internalDiameterCm,1);
+    h += " cm; využitelná hloubka: "; h += String(wellGeometry.usableDepthCm,1); h += " cm</p><p>Kalibračních bodů: ";
+    h += String(wellCalibration.pointCount); h += "</p>";
+    h += "</section>";
     h += "<section><h3>Objemová kalibrace studny</h3><p>Zadejte alespoň dva body, jeden na řádek ve formátu <code>hladina_cm,objem_l</code>, například <code>100,2500</code>. Používejte desetinnou tečku; hladina i objem musí vzestupně růst.</p>";
     h += "<form method='post' action='/calibration'><label>Kalibrační body (max. 32)</label><textarea name='points' rows='8' required placeholder='100,2500&#10;200,5100'></textarea><label><input style='width:auto' type='checkbox' name='absolute' value='yes'> Potvrzuji, že zadané objemy jsou skutečně změřené absolutní objemy v litrech.</label><button type='submit'>Sloučit a uložit kalibraci</button></form>";
     h += "<small>Body mimo nově zadaný interval zůstanou zachovány. Pokud je stávající kalibrace poškozená nebo si body odporují, zápis bude odmítnut.</small></section>";
@@ -1097,6 +1092,22 @@ void handleRoot() {
         h += "<form method='post' action='/sensor-calibration'><input type='hidden' name='sensor' value='lower'><h4>Snímač dolní nádrže</h4><label>Měřítko (scale, 0,5–1,5)</label><input name='scale' type='number' min='0.5' max='1.5' step='0.001' required value='" + String(lowerTankConfig.calibrationScale, 3) + "'><label>Posun hladiny (cm, −2000 až 2000)</label><input name='offset' type='number' min='-2000' max='2000' step='0.1' required value='" + String(lowerTankConfig.calibrationOffsetCm, 1) + "'><button type='submit'>Uložit kalibraci dolní nádrže</button></form>";
     } else {
         h += "<h4>Servisní obnova snímače dolní nádrže</h4><p class='warn'>Použijte pouze po nezávislém fyzickém změření skutečné hladiny. Zadejte ověřené měřítko; posun se vypočítá z aktuálního surového měření a referenční hladiny.</p><form method='post' action='/sensor-recovery'><input type='hidden' name='sensor' value='lower'><label>Ověřené měřítko (0,5–1,5)</label><input name='scale' type='number' min='0.5' max='1.5' step='0.001' required><label>Skutečná hladina změřená nezávislou metodou (cm)</label><input name='reference' type='number' min='0' max='2000' step='0.1' required><label><input style='width:auto' type='checkbox' name='physical' value='yes' required> Potvrzuji fyzické změření hladiny nezávislou referencí a správné přiřazení snímače.</label><button type='submit'>Obnovit elektrické nastavení dolní nádrže</button></form>";
+    }
+    h += "</section>";
+    h += "<section><h3>Síť a verze firmwaru</h3><p>Ethernet W5500: ";
+    const EthernetStartup startup = ethernetStartup.load();
+    if (startup == EthernetStartup::Ready && ETH.linkUp() && ETH.hasIP()) {
+        h += "DHCP adresa přidělena</p><p>IP adresa: <b>" + ETH.localIP().toString() + "</b></p>";
+    } else {
+        if (startup == EthernetStartup::Pending) h += "Probíhá inicializace W5500";
+        else if (startup == EthernetStartup::Failed) h += "Inicializace W5500 selhala";
+        else h += ETH.linkUp() ? "Čeká se na DHCP" : "Fyzický link je odpojen";
+        h += "</p>";
+    }
+    h += "<p>Ovládací web je dostupný přes Ethernet i Wi-Fi. REV107 Core 3 – stolní zkouška.</p>";
+    h += apMode ? "<p>Servisní AP je zapnutý.</p>" : "<p>Servisní AP je vypnutý.</p>";
+    if (apMode) {
+        h += "<p>Adresa AP: " + WiFi.softAPIP().toString() + "<br>AP: <b>" + htmlEscape(apName) + "</b></p>";
     }
     h += "</section>";
     h += "<section><h3>Domácí Wi-Fi</h3><p>";
@@ -2055,7 +2066,7 @@ void setup() {
         writeValveRelayLevel);
     delay(250);
     Serial.println();
-    Serial.println("HOME WATER CONTROLLER - ESP32 #1 / REV105 CORE 3 BENCH");
+    Serial.println("HOME WATER CONTROLLER - ESP32 #1 / REV107 CORE 3 BENCH");
     Serial.println("DEVELOPMENT BUILD - VALVE RELAYS AND PUMP SAFETY OUTPUTS ENABLED");
     // Relay pins were initialized OFF before the startup delay above.
     Serial.printf("Valve relay driver: %s; well GPIO=%u, upper GPIO=%u, active-high; relay board supply 5V\n",

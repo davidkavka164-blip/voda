@@ -11,5 +11,5 @@ if grep -q 'LOWER_TANK_MIN_WORKING_LEVEL_CM' firmware/common/LowerTankPumpProtec
   echo 'FAIL: 11 cm value is used by lower pump protection logic' >&2; exit 1
 fi
 grep -q 'Pracovní minimum 11 cm je pouze informativní' firmware/ESP32_1/ESP32_1.ino
-grep -q 'výhradně výše nastavená minimální hladina a hystereze' firmware/ESP32_1/ESP32_1.ino
+grep -q 'výhradně nastavená minimální hladina a hystereze' firmware/ESP32_1/ESP32_1.ino
 echo 'PASS: 11 cm remains informational only; lower pump protection uses configured minimum and hysteresis'
