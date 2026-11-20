@@ -1,3 +1,5 @@
+> Tato větev obsahuje [stolní experiment REV98 pro ESP32 #2 s core 3.3.7](docs/ESP32_2_CORE3_BENCH_REV98.md). Níže je zachovaný popis výchozího REV97.
+
 # HOME WATER CONTROLLER — vývojový balíček 1.00 REV97
 
 REV97 upravuje čtení HTTP hlaviček prohlížečů na ethernetovém přehledu obou jednotek. Aktualizace OTA se spouští z ovládacího webu přes Wi-Fi.

@@ -19,11 +19,9 @@
 #include "src/NvsUpperTankVolumeCalibrationStore.h"
 #include "src/UpperTankProtection.h"
 #include "src/PumpSafetyRelayOutput.h"
-#include <SPI.h>
-#include <Ethernet.h>
-#include "src/EthernetStatus.h"
+#include <ETH.h>
+#include <Network.h>
 #include "src/WifiStaCredentialStore.h"
-#include "src/SampleFreshness.h"
 #include <WiFi.h>
 #include <WebServer.h>
 #include <Update.h>
@@ -84,18 +82,8 @@ String savedWifiSsid;
 String savedWifiPassword;
 uint32_t lastWifiAttemptMs = 0;
 bool wifiReconnectRequested = false;
-uint32_t lastUpperReadingMs = 0;
-struct UpperEthernetSnapshot {
-    bool levelValid;
-    uint32_t levelReadAt;
-    float levelCm;
-    HWC::WaterTemperatureReading temperature;
-};
-
-void renderEthernetStatus(const UpperEthernetSnapshot& water, uint32_t now, char* body, size_t capacity);
-HWC::EthernetStatus<UpperEthernetSnapshot> ethernetStatus(
-    HwcPins::Esp32_2::W5500_CS, HwcPins::Esp32_2::W5500_RST, HwcPins::Esp32_2::W5500_SCK,
-    HwcPins::Esp32_2::W5500_MISO, HwcPins::Esp32_2::W5500_MOSI, renderEthernetStatus);
+bool ethernetStarted = false;
+IPAddress reportedEthernetIp;
 HWC::NvsUpperTankLimitsStore upperLimitsStore("hwc_upperlimits");
 HWC::NvsUpperTankProtectionStore upperSafetyStore("hwc_up_safety");
 HWC::NvsUpperTankVolumeCalibrationStore upperVolumeStore;
@@ -445,15 +433,14 @@ void handleLocalRoot() {
     }
     h += "<p>Teplota je pouze informativní. Nemá vliv na ochranu čerpadla ani řízení ventilů.</p></section>";
     h += "<section><h3>Síťové připojení W5500</h3><p>Stav Ethernetu: ";
-    const HWC::EthernetLinkView link = ethernetStatus.linkView();
-    if (link.ready) {
-        h += "DHCP adresa přidělena";
-        h += "</p><p>IP adresa: <b>" + IPAddress(link.octets).toString() + "</b></p>";
+    if (ethernetStarted && ETH.hasIP()) {
+        h += "DHCP adresa přidělena</p><p>IP adresa: <b>" + ETH.localIP().toString() + "</b></p>";
     } else {
-        h += link.linkDown ? "Fyzický link je odpojen" : "Čeká se na DHCP / obnovení připojení";
-        h += "</p><p>Lokální měření a ochrana čerpadla pokračují nezávisle.</p>";
+        h += !ethernetStarted ? "Inicializace W5500 selhala" :
+             (ETH.linkUp() ? "Čeká se na DHCP" : "Fyzický link je odpojen");
+        h += "</p>";
     }
-    h += "<p>W5500 poskytuje stav hladiny a teploty na /status po přihlášení.</p></section>";
+    h += "<p>Ovládací web je dostupný přes Ethernet i Wi-Fi. REV98 Core 3 – stolní zkouška.</p></section>";
     h += "<section><h3>Domácí Wi-Fi</h3><p>";
     if (WiFi.status() == WL_CONNECTED) {
         h += "Připojeno, IP adresa: " + WiFi.localIP().toString();
@@ -907,22 +894,17 @@ void startLocalWeb() {
     }
 
     WiFi.persistent(false);
-    if (!WiFi.mode(WIFI_AP)) {
-        localApName = "";
-        localApPassword = "";
-        localAdminPassword = "";
-        Serial.println("Local upper-tank Wi-Fi mode initialization failed; local UI disabled.");
-        return;
-    }
-    if (!WiFi.softAP(localApName.c_str(), localApPassword.c_str())) {
-        localApName = "";
-        localApPassword = "";
-        localAdminPassword = "";
-        Serial.println("Local upper-tank AP failed; local UI disabled."); return;
+    const bool apStarted = WiFi.mode(WIFI_AP) &&
+                           WiFi.softAP(localApName.c_str(), localApPassword.c_str());
+    if (apStarted) {
+        Serial.printf("Upper tank local AP started: SSID=%s IP=192.168.4.1\n", localApName.c_str());
+    } else {
+        Serial.println("Upper tank service AP could not start.");
     }
     static const char* requestHeaders[] = {"Origin", "Host"};
     localWebServer.collectHeaders(requestHeaders, 2);
     localWebServer.on("/", HTTP_GET, handleLocalRoot);
+    localWebServer.on("/status", HTTP_GET, handleLocalRoot);
     localWebServer.on("/wifi", HTTP_POST, handleLocalWifi);
     localWebServer.on("/local-limits", HTTP_POST, handleLocalLimits);
     localWebServer.on("/volume-anchor", HTTP_POST, handleLocalVolumeAnchor);
@@ -935,8 +917,8 @@ void startLocalWeb() {
     localWebServer.on("/pump-emergency", HTTP_POST, handleLocalPumpEmergency);
     localWebServer.on("/update", HTTP_POST, handleLocalUpdateComplete, handleLocalUpdateUpload);
     localWebServer.onNotFound([]() { if (!requireLocalAuth()) return; localWebServer.send(404, "text/plain", "Not found"); });
-    localWebServer.begin(); localWebReady = true;
-    Serial.printf("Upper tank local AP started: SSID=%s IP=192.168.4.1\n", localApName.c_str());
+    localWebServer.begin();
+    localWebReady = true;
 }
 
 void maintainLocalWifi(uint32_t now) {
@@ -953,17 +935,23 @@ void maintainLocalWifi(uint32_t now) {
     }
 }
 
-void renderEthernetStatus(const UpperEthernetSnapshot& water, uint32_t now, char* body, size_t capacity) {
-    char level[32] = "nedostupné";
-    char temperature[32] = "nedostupná";
-    if (HWC::sampleIsFresh(water.levelValid, now, water.levelReadAt, 5000U)) {
-        snprintf(level, sizeof(level), "%.1f cm", water.levelCm);
+void startEthernet() {
+    // W5500 INT is not wired. Core 3.3.7 polls RX with irq = -1.
+    ethernetStarted = ETH.begin(
+        ETH_PHY_W5500, 1, HwcPins::Esp32_2::W5500_CS, -1, HwcPins::Esp32_2::W5500_RST,
+        SPI3_HOST, HwcPins::Esp32_2::W5500_SCK, HwcPins::Esp32_2::W5500_MISO,
+        HwcPins::Esp32_2::W5500_MOSI);
+    if (!ethernetStarted) Serial.println("W5500 driver initialization failed.");
+}
+
+void reportEthernetAddress() {
+    if (!ethernetStarted) return;
+    const IPAddress ip = ETH.hasIP() ? ETH.localIP() : IPAddress();
+    if (ip == reportedEthernetIp) return;
+    reportedEthernetIp = ip;
+    if (ip != IPAddress()) {
+        Serial.printf("Ethernet management: http://%s/\n", ip.toString().c_str());
     }
-    if (HWC::isWaterTemperatureFresh(water.temperature, now, WATER_TEMPERATURE_MAX_AGE_MS)) {
-        snprintf(temperature, sizeof(temperature), "%.2f °C", water.temperature.temperatureC);
-    }
-    snprintf(body, capacity, "HOME WATER CONTROLLER — ESP32 #2\nHorní nádrž: %s\nTeplota vody: %s\n",
-             level, temperature);
 }
 
 void printReading(const char* name, const HWC::LevelSensorReading& r) {
@@ -992,7 +980,7 @@ void setup() {
         HwcPins::Esp32_2::PUMP_SAFETY_OUTPUTS_ENABLED, writePumpSafetyRelayLevel);
     delay(250);
     Serial.println();
-    Serial.println("HOME WATER CONTROLLER - ESP32 #2");
+    Serial.println("HOME WATER CONTROLLER - ESP32 #2 / REV98 CORE 3 BENCH");
     Serial.println("SENSOR ACQUISITION STAGE - UPPER PUMP SAFETY RELAY ENABLED");
     Serial.printf("W5500 pin plan: SCK=%u MISO=%u MOSI=%u CS=%u RST=%u\n",
                   HwcPins::Esp32_2::W5500_SCK, HwcPins::Esp32_2::W5500_MISO,
@@ -1083,21 +1071,25 @@ void setup() {
 
     discoverWaterTemperatureSensor(millis());
 
-    startLocalWeb();
-    if (localWebReady) loadLocalWifi();
-    ethernetStatus.begin(localAdminPassword);
+    if (Network.begin()) {
+        startEthernet();
+        startLocalWeb();
+        if (localWebReady) loadLocalWifi();
+    } else {
+        Serial.println("Network initialization failed; local sensing and protection remain active.");
+    }
 }
 
 void loop() {
     if (localWebReady) localWebServer.handleClient();
     const uint32_t now = millis();
     maintainLocalWifi(now);
+    reportEthernetAddress();
     maintainWaterTemperature(now);
     if (static_cast<uint32_t>(now - lastReportMs) >= 2000U) {
         lastReportMs = now;
         const HWC::LevelSensorReading upper = upperTankSensor->read();
         lastUpperReading = upper;
-        lastUpperReadingMs = now;
         haveUpperReading = true;
         printReading("UPPER_TANK", upper);
         const bool upperSensorValid = HWC::sensorConfigUsableForLevelMeasurement(upperSensorConfigState) &&
@@ -1147,11 +1139,5 @@ void loop() {
 
     }
     syncUpperPumpSafetyRelay(millis());
-    const UpperEthernetSnapshot water = {
-        haveUpperReading && lastUpperReading.result.status == HWC::SENSOR_MATH_OK &&
-            HWC::sensorConfigUsableForLevelMeasurement(upperSensorConfigState),
-        lastUpperReadingMs, lastUpperReading.result.calibratedLevelCm, waterTemperatureReading
-    };
-    ethernetStatus.publish(water);
     delay(10);
 }
