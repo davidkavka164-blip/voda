@@ -26,9 +26,11 @@ grep -Fq 'upperSafetyStorageReady = false;' "$ESP2"
 grep -Fq 'transferRestartGuard.canStart()' "$ESP1"
 grep -Fq 'all new transfer requests are blocked' "$ESP1"
 
-# Upper volume calibration is informational and separately guarded from pump permits.
-grep -Fq 'upperVolumeCalibrationCorrupt = !upperVolumeCalibrationValid;' "$ESP2"
-grep -Fq 'upperVolumeCalibrationCorrupt' "$ESP2"
+# Firmware leaves historical upper-volume records untouched.
+if grep -Eq 'upperVolumeStore|NvsUpperTankVolumeCalibrationStore' "$ESP2"; then
+  echo 'FAIL: ESP32 #2 still accesses historical upper-volume records' >&2
+  exit 1
+fi
 
 # REV78 transactional upper limits store must retain all four journal components.
 LIMITS="$ROOT/firmware/common/NvsUpperTankLimitsStore.cpp"
