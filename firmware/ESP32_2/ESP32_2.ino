@@ -248,7 +248,7 @@ void sendLocalResult(const String& message) {
     String h = "<!doctype html><html lang='cs'><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>";
     h += "<title>HWC horní nádrž</title><body style='font:16px Arial;max-width:700px;margin:24px auto;padding:0 14px'><h1>Horní nádrž – výsledek</h1><p>";
     h += message;
-    h += "</p><p><a href='/'>Zpět</a></p></body></html>";
+    h += "</p><p><a href='/'>Zpět na přehled</a></p></body></html>";
     localWebServer.send(200, "text/html; charset=utf-8", h);
 }
 
@@ -440,7 +440,7 @@ void handleLocalRoot() {
              (ETH.linkUp() ? "Čeká se na DHCP" : "Fyzický link je odpojen");
         h += "</p>";
     }
-    h += "<p>Ovládací web je dostupný přes Ethernet i Wi-Fi. REV98 Core 3 – stolní zkouška.</p></section>";
+    h += "<p>Ovládací web je dostupný přes Ethernet i Wi-Fi. REV99 Core 3 – stolní zkouška.</p></section>";
     h += "<section><h3>Domácí Wi-Fi</h3><p>";
     if (WiFi.status() == WL_CONNECTED) {
         h += "Připojeno, IP adresa: " + WiFi.localIP().toString();
@@ -686,8 +686,8 @@ void handleLocalUpdateUpload() {
 void handleLocalUpdateComplete() {
     if (!requireLocalAuth()) return;
     if (localOtaSucceeded) {
-        localWebServer.send(200, "text/html; charset=utf-8",
-            "<!doctype html><html lang='cs'><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><body><h2>Aktualizace ESP32 #2 byla dokončena.</h2><p>Zařízení se restartuje. Pokud se přístupový bod znovu neobjeví, zkontrolujte Serial Monitor a napájení.</p></body></html>");
+        sendLocalResult("Aktualizace ESP32 #2 byla dokončena. Zařízení se restartuje. "
+                        "Za několik sekund klikněte na Zpět na přehled.");
         delay(1000);
         ESP.restart();
         return;
@@ -980,7 +980,7 @@ void setup() {
         HwcPins::Esp32_2::PUMP_SAFETY_OUTPUTS_ENABLED, writePumpSafetyRelayLevel);
     delay(250);
     Serial.println();
-    Serial.println("HOME WATER CONTROLLER - ESP32 #2 / REV98 CORE 3 BENCH");
+    Serial.println("HOME WATER CONTROLLER - ESP32 #2 / REV99 CORE 3 BENCH");
     Serial.println("SENSOR ACQUISITION STAGE - UPPER PUMP SAFETY RELAY ENABLED");
     Serial.printf("W5500 pin plan: SCK=%u MISO=%u MOSI=%u CS=%u RST=%u\n",
                   HwcPins::Esp32_2::W5500_SCK, HwcPins::Esp32_2::W5500_MISO,

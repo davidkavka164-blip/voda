@@ -42,6 +42,14 @@ přes OTA není potřeba měnit Arduino IDE ani core na počítači.
 Uživatel potvrdil, že se na ESP32 #2 s REV98 zobrazuje stejný ovládací web
 přes Wi-Fi i W5500. Způsob prvního nahrání REV98 nebyl výslovně potvrzen.
 
-Před nasazením ve sklepě zbývá na REV98 ověřit přístup přes kabel bez
-připojení ESP32 k domácí Wi-Fi, obnovu po odpojení kabelu a nahrání OTA přes
-Ethernet. Sestava zůstává určená pro stolní ověření.
+Uživatel dále potvrdil funkční ovládací web i nahrání OTA přes Ethernet,
+když ESP32 nebyla připojená k domácí Wi-Fi. Samostatné potvrzení návratu
+REV98 po odpojení kabelu zatím chybí.
+
+## REV99
+
+Po úspěšném zápisu OTA používá ESP32 #2 stejnou stránku s výsledkem jako
+ostatní formuláře. Nabízí odkaz **Zpět na přehled** na `/`, který po
+restartu otevře základní stránku bez opakování nahrávání. Výsledek prvního
+nahrání REV99 ještě zobrazí firmware REV98. Odkaz lze ověřit po další
+aktualizaci spuštěné z běžící REV99.
