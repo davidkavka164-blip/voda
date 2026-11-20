@@ -24,7 +24,16 @@ Tento dokument aktualizuje stav sítě a ověření [masteru 3.17 / REV94](MASTE
 | Software REV97 | Oba sketchy přeloženy s core 1.0.6. Prošlo 81 nativních testovacích programů, statické kontroly a 17 testů v Pythonu. |
 | Čidla, relé, ventily a čerpadla | Provozní ověření zůstává otevřené. Úspěšná síťová zkouška nepotvrzuje elektrické zapojení ani funkci ochran na konkrétní instalaci. |
 
-## Další stolní zkouška
+## Navazující stolní ověření ESP32 #2
+
+Na samostatné větvi `esp32-2-core3-bench` uživatel potvrdil plný ovládací
+web přes Wi-Fi i Ethernet, OTA přes Ethernet bez domácí Wi-Fi a následně
+funkční stolní zkoušku REV102 s vypínáním domácí Wi-Fi a záložním servisním
+AP. Výsledky jsou vedené v [protokolu stolní zkoušky](https://github.com/davidkavka164-blip/voda/blob/a382fc45d5df50c58708087a6ead1f319e667f4b/docs/ESP32_2_CORE3_BENCH_REV98.md).
+Firmware ve větvi `main` zůstává REV97. Provozní ověření čidel, relé a
+ventilů zůstává otevřené.
+
+## Další stolní zkouška v REV97
 
 U ESP32 #2 s odpojenými výstupy čerpadla nejprve nahraj odpovídající sketch přes USB, pokud na desce ještě není její firmware. Ověř servisní AP a přihlášení, ulož údaje domácí Wi-Fi a ověř ovládací web přes domácí IP i servisní AP. U již ověřeného W5500 zbývá potvrdit obnovu spojení. Otevři `/status`, odpoj a připoj síťový kabel a obnov stránku bez restartu. Přehled má zobrazit horní hladinu a teplotu nebo příslušnou informaci o nedostupnosti. K případné zkoušce OTA použij aplikační soubor výhradně pro danou jednotku.
 
