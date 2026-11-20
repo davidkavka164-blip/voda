@@ -1,0 +1,2 @@
+# Only needed for --send; preview and unit tests use the Python standard library.
+pyserial==3.5
