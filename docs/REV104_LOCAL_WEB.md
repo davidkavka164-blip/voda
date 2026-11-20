@@ -36,3 +36,28 @@ rozsah nebo měření leží mimo něj, číslo nemá modrou výplň.
 
 - [ESP32 #1 – OTA REV105](../ota/ESP32_1_REV105_CORE3_BENCH.bin)
 - [ESP32 #2 – OTA REV105](../ota/ESP32_2_REV105_CORE3_BENCH.bin)
+
+## REV106 – kalibrace objemu horní nádrže
+
+ESP32 #2 opět poskytuje objemovou kalibraci nepravidelné horní nádrže.
+Pod nákresem ukazuje celkový objem vody při aktuální hladině jako
+kalibrační bod nebo odhad mezi sousedními body. Mimo kalibrovaný rozsah
+a bez platné čerstvé hladiny je objem nedostupný. Samotný nákres stále
+představuje výšku hladiny.
+
+1. V části **Objemová kalibrace horní nádrže** ulož první známou dvojici:
+   aktuální hladinu a celkový objem ověřený nezávisle. Pokud je objem
+   kladný, stejný vzorek se uloží také jako výchozí stav přepouštění.
+2. Po přepouštění zadej na ESP32 #2 odhad skutečného přírůstku dolní nádrže
+   z historie ESP32 #1, tedy výsledek podle změny hladiny, nikoli cílový
+   počet litrů. Mezi záznamy v obou nádržích nesmí proběhnout jiný přítok
+   ani odběr.
+3. ESP32 #2 od výchozího objemu odečte přepuštěné litry a uloží bod
+   pro novou hladinu. Před dalším přepouštěním ulož novou referenci.
+   Body se ukládají do stávajícího úložiště a ověřují zpětným načtením.
+
+Záznamy z dřívější kalibrace se znovu použijí, pokud projdou ověřením.
+Položky rezervy domácnosti zůstávají mimo web a ochrana čerpadla pracuje
+s hladinou. Jednotky si data neposílají.
+
+- [ESP32 #2 – OTA REV106](../ota/ESP32_2_REV106_CORE3_BENCH.bin)

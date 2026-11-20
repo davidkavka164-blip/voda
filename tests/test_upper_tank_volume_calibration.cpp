@@ -53,5 +53,17 @@ int main() {
     assert(addUpperTankVolumeCalibrationPoint(c, 80.0f, 100.0f, true, next) == UPPER_VOLUME_EDIT_CONFLICT);
     assert(!setUpperTankTransferReference(c, 40.0f, reference));
     assert(addUpperTankPostTransferPoint(c, 80.0f, 100.0f, next) == UPPER_VOLUME_EDIT_INVALID_POINT);
+    // Start the first transfer with the exact sample used for the first point.
+    UpperTankVolumeCalibration first = emptyUpperTankVolumeCalibration();
+    assert(addUpperTankVolumeCalibrationPoint(first, 123.456f, 4200.0f, true, first) == UPPER_VOLUME_EDIT_OK);
+    assert(setUpperTankTransferReference(first, 123.456f, first));
+    assert(first.transferReferenceValid && first.transferReferenceVolumeLiters == 4200.0f);
+    UpperTankVolumeCalibration afterFirstTransfer = emptyUpperTankVolumeCalibration();
+    assert(addUpperTankPostTransferPoint(first, 103.123f, 800.0f, afterFirstTransfer) == UPPER_VOLUME_EDIT_OK);
+    assert(!afterFirstTransfer.transferReferenceValid && afterFirstTransfer.pointCount == 2);
+    const UpperTankVolumeResult between = estimateUpperTankVolume(113.2895f, afterFirstTransfer);
+    assert(between.status == UPPER_VOLUME_INTERPOLATED);
+    assert(between.liters > 3799.9f && between.liters < 3800.1f);
+
     puts("PASS: upper tank absolute volume calibration, interpolation, transfer-derived points and validation");
 }

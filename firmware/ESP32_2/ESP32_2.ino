@@ -17,6 +17,8 @@
 #include "src/UpperTankLimits.h"
 #include "src/NvsUpperTankLimitsStore.h"
 #include "src/NvsUpperTankProtectionStore.h"
+#include "src/UpperTankVolumeCalibration.h"
+#include "src/NvsUpperTankVolumeCalibrationStore.h"
 #include "src/UpperTankProtection.h"
 #include "src/PumpSafetyRelayOutput.h"
 #include <ETH.h>
@@ -95,6 +97,11 @@ std::atomic<EthernetStartup> ethernetStartup{EthernetStartup::Pending};
 IPAddress reportedEthernetIp;
 HWC::NvsUpperTankLimitsStore upperLimitsStore("hwc_upperlimits");
 HWC::NvsUpperTankProtectionStore upperSafetyStore("hwc_up_safety");
+HWC::NvsUpperTankVolumeCalibrationStore upperVolumeStore;
+HWC::UpperTankVolumeCalibration upperVolumeCalibration = HWC::emptyUpperTankVolumeCalibration();
+bool upperVolumeStoreReady = false;
+bool upperVolumeCalibrationValid = false;
+bool upperVolumeCalibrationCorrupt = false;
 HWC::UpperTankSafetyState upperSafetyState = {false, false};
 bool upperSafetyStorageReady = false;
 bool upperSafetyRecordPresent = false;
@@ -256,6 +263,198 @@ void sendLocalResult(const String& message) {
     localWebServer.send(200, "text/html; charset=utf-8", h);
 }
 
+bool currentUpperLevelForVolumeCalibration(float& levelCm) {
+    const uint32_t now = millis();
+    if (upperSensorConfigState != HWC::SENSOR_CONFIG_VALID_STORED || !haveUpperReading ||
+        static_cast<uint32_t>(now - lastReportMs) > 5000U ||
+        lastUpperReading.result.status != HWC::SENSOR_MATH_OK) return false;
+    levelCm = lastUpperReading.result.calibratedLevelCm;
+    return std::isfinite(levelCm) && levelCm >= 0.0f && levelCm <= 2000.0f;
+}
+
+void markUpperVolumeStoreUncertain() {
+    // A failed Preferences write/read-back does not prove that the old blob
+    // survived. Block further calibration operations until reboot revalidates
+    // the persisted record; this calibration is informational, not pump safety.
+    upperVolumeCalibrationValid = false;
+    upperVolumeCalibrationCorrupt = true;
+    Serial.println("ERROR: upper volume calibration NVS state is uncertain; editing is blocked until restart and verified reload.");
+}
+
+void handleLocalVolumeCorruptReset() {
+    if (!requireLocalAuth()) return;
+    if (!upperVolumeStoreReady || !upperVolumeCalibrationCorrupt ||
+        !localWebServer.hasArg("physical") || localWebServer.arg("physical") != "yes") {
+        localWebServer.send(409, "text/plain; charset=utf-8",
+            "Servisní obnova vyžaduje poškozený záznam a výslovné fyzické potvrzení.");
+        return;
+    }
+    if (!upperVolumeStore.discardCorruptRecord()) {
+        markUpperVolumeStoreUncertain();
+        localWebServer.send(500, "text/plain; charset=utf-8",
+            "Odstranění poškozeného záznamu nebo jeho ověření selhalo. Stav NVS není jistý; restartujte zařízení a nechte záznam znovu ověřit.");
+        return;
+    }
+    upperVolumeCalibration = HWC::emptyUpperTankVolumeCalibration();
+    upperVolumeCalibrationValid = true;
+    upperVolumeCalibrationCorrupt = false;
+    sendLocalResult("Poškozený záznam byl odstraněn a ověřeno, že v NVS nezůstal. Objemová kalibrace je nyní nenastavená; před zobrazením absolutního objemu musíte zadat nový fyzicky ověřený absolutní kotevní bod.");
+}
+
+void handleLocalVolumeAnchor() {
+    if (!requireLocalAuth()) return;
+    if (!upperVolumeStoreReady || upperVolumeCalibrationCorrupt) {
+        localWebServer.send(503, "text/plain; charset=utf-8", "Úložiště kalibrace objemu není bezpečně dostupné."); return;
+    }
+    if (upperVolumeCalibration.pointCount != 0) {
+        localWebServer.send(409, "text/plain; charset=utf-8", "První objemový bod už je uložený."); return;
+    }
+    float level = 0.0f, liters = 0.0f;
+    if (!currentUpperLevelForVolumeCalibration(level) || !localWebServer.hasArg("liters") ||
+        !parseFloatStrictLocal(localWebServer.arg("liters"), liters) || liters < 0.0f || liters > 100000.0f ||
+        localWebServer.arg("physical") != "yes") {
+        localWebServer.send(400, "text/plain; charset=utf-8", "Zadejte platný absolutní objem a potvrďte fyzické ověření hladiny i objemu."); return;
+    }
+    HWC::UpperTankVolumeCalibration updated = HWC::emptyUpperTankVolumeCalibration();
+    const HWC::UpperTankVolumeEditStatus edit = HWC::addUpperTankVolumeCalibrationPoint(
+        upperVolumeCalibration, level, liters, true, updated);
+    if (edit != HWC::UPPER_VOLUME_EDIT_OK) {
+        localWebServer.send(409, "text/plain; charset=utf-8", "Absolutní referenční bod nelze přidat k aktuální kalibraci."); return;
+    }
+    // Use precisely the same sample for the anchor and the first transfer reference.
+    if (liters > 0.0f && !HWC::setUpperTankTransferReference(updated, level, updated)) {
+        localWebServer.send(409, "text/plain; charset=utf-8", "Výchozí referenci nelze uložit."); return;
+    }
+    if (!upperVolumeStore.save(updated)) {
+        markUpperVolumeStoreUncertain();
+        localWebServer.send(500, "text/plain; charset=utf-8", "Zápis nebo zpětné ověření selhalo. Stav NVS není jistý; kalibrační operace jsou zablokovány do restartu a ověřeného načtení."); return;
+    }
+    upperVolumeCalibration = updated;
+    upperVolumeCalibrationValid = true;
+    sendLocalResult(updated.transferReferenceValid
+        ? "První objemový bod a výchozí stav byly uloženy. Po přepouštění zadej skutečný přírůstek dolní nádrže."
+        : "První objemový bod byl uložen a ověřen zpětným načtením.");
+}
+
+void handleLocalVolumePoint() {
+    if (!requireLocalAuth()) return;
+    if (!upperVolumeStoreReady || !upperVolumeCalibrationValid || upperVolumeCalibrationCorrupt ||
+        !upperVolumeCalibration.absoluteAnchorKnown) {
+        localWebServer.send(409, "text/plain; charset=utf-8", "Nejdříve musí existovat platný absolutní referenční bod."); return;
+    }
+    if (upperVolumeCalibration.transferReferenceValid) {
+        localWebServer.send(409, "text/plain; charset=utf-8", "Během otevřené reference přepouštění nelze ručně měnit kalibrační tabulku. Nejdříve dokončete kalibrační transfer nebo referenci výslovně zrušte."); return;
+    }
+    float level = 0.0f, liters = 0.0f;
+    if (!localWebServer.hasArg("level") || !localWebServer.hasArg("liters") ||
+        !parseFloatStrictLocal(localWebServer.arg("level"), level) ||
+        !parseFloatStrictLocal(localWebServer.arg("liters"), liters) ||
+        level < 0.0f || level > 2000.0f || liters < 0.0f || liters > 100000.0f ||
+        localWebServer.arg("physical") != "yes") {
+        localWebServer.send(400, "text/plain; charset=utf-8", "Zadejte platnou výšku, absolutní objem a potvrďte fyzické ověření bodu."); return;
+    }
+    HWC::UpperTankVolumeCalibration updated = HWC::emptyUpperTankVolumeCalibration();
+    const HWC::UpperTankVolumeEditStatus edit = HWC::addUpperTankVolumeCalibrationPoint(
+        upperVolumeCalibration, level, liters, true, updated);
+    if (edit != HWC::UPPER_VOLUME_EDIT_OK) {
+        localWebServer.send(409, "text/plain; charset=utf-8", "Bod by porušil vzestupné pořadí hladin a objemů nebo překročil kapacitu tabulky. Kalibrace nebyla změněna."); return;
+    }
+    if (!upperVolumeStore.save(updated)) {
+        markUpperVolumeStoreUncertain();
+        localWebServer.send(500, "text/plain; charset=utf-8", "Zápis nebo zpětné ověření selhalo. Stav NVS není jistý; kalibrační operace jsou zablokovány do restartu a ověřeného načtení."); return;
+    }
+    upperVolumeCalibration = updated;
+    sendLocalResult("Absolutní kalibrační bod byl uložen a ověřen.");
+}
+
+void handleLocalVolumeReference() {
+    if (!requireLocalAuth()) return;
+    if (!upperVolumeStoreReady || !upperVolumeCalibrationValid || upperVolumeCalibrationCorrupt ||
+        !upperVolumeCalibration.absoluteAnchorKnown) {
+        localWebServer.send(409, "text/plain; charset=utf-8", "Nejdříve musí existovat platná absolutní kalibrace objemu."); return;
+    }
+    if (localWebServer.arg("physical") != "yes") {
+        localWebServer.send(400, "text/plain; charset=utf-8", "Potvrďte, že před přepouštěním není žádný nepočítaný přítok ani odběr."); return;
+    }
+    float level = 0.0f;
+    HWC::UpperTankVolumeCalibration updated = HWC::emptyUpperTankVolumeCalibration();
+    if (!currentUpperLevelForVolumeCalibration(level) ||
+        !HWC::setUpperTankTransferReference(upperVolumeCalibration, level, updated)) {
+        localWebServer.send(409, "text/plain; charset=utf-8", "Aktuální hladina není uvnitř ověřeného kalibračního rozsahu. Referenci nelze uložit."); return;
+    }
+    if (!upperVolumeStore.save(updated)) {
+        markUpperVolumeStoreUncertain();
+        localWebServer.send(500, "text/plain; charset=utf-8", "Zápis nebo zpětné ověření selhalo. Stav NVS není jistý; kalibrační operace jsou zablokovány do restartu a ověřeného načtení."); return;
+    }
+    upperVolumeCalibration = updated;
+    sendLocalResult("Výchozí stav horní nádrže byl uložen. Nyní proveďte přepouštění a po jeho skončení zadejte skutečně přepuštěné litry.");
+}
+
+void handleLocalVolumeReferenceCancel() {
+    if (!requireLocalAuth()) return;
+    if (!upperVolumeStoreReady || !upperVolumeCalibrationValid || upperVolumeCalibrationCorrupt ||
+        !upperVolumeCalibration.transferReferenceValid || localWebServer.arg("physical") != "yes") {
+        localWebServer.send(409, "text/plain; charset=utf-8", "Zrušení vyžaduje platnou uloženou referenci a fyzické potvrzení."); return;
+    }
+    HWC::UpperTankVolumeCalibration updated = HWC::emptyUpperTankVolumeCalibration();
+    if (!HWC::clearUpperTankTransferReference(upperVolumeCalibration, updated)) {
+        localWebServer.send(409, "text/plain; charset=utf-8", "Uloženou referenci nelze zrušit z aktuálního stavu."); return;
+    }
+    if (!upperVolumeStore.save(updated)) {
+        markUpperVolumeStoreUncertain();
+        localWebServer.send(500, "text/plain; charset=utf-8", "Zápis nebo zpětné ověření selhalo. Stav NVS není jistý; kalibrační operace jsou zablokovány do restartu a ověřeného načtení."); return;
+    }
+    upperVolumeCalibration = updated;
+    sendLocalResult("Výchozí reference byla zrušena. Před dalším transferem uložte nový výchozí stav.");
+}
+
+void handleLocalVolumeTransfer() {
+    if (!requireLocalAuth()) return;
+    if (!upperVolumeStoreReady || !upperVolumeCalibrationValid || upperVolumeCalibrationCorrupt ||
+        !upperVolumeCalibration.transferReferenceValid) {
+        localWebServer.send(409, "text/plain; charset=utf-8", "Chybí platná výchozí reference před přepouštěním."); return;
+    }
+    float currentLevel = 0.0f, transferredLiters = 0.0f;
+    if (!currentUpperLevelForVolumeCalibration(currentLevel) || !localWebServer.hasArg("liters") ||
+        !parseFloatStrictLocal(localWebServer.arg("liters"), transferredLiters) ||
+        transferredLiters <= 0.0f || transferredLiters > 100000.0f || localWebServer.arg("physical") != "yes") {
+        localWebServer.send(400, "text/plain; charset=utf-8", "Zadejte skutečný kladný přírůstek v dolní nádrži podle ESP32 #1 a potvrďte, že mezitím nedošlo k jinému přítoku ani odběru."); return;
+    }
+    HWC::UpperTankVolumeCalibration updated = HWC::emptyUpperTankVolumeCalibration();
+    const HWC::UpperTankVolumeEditStatus edit = HWC::addUpperTankPostTransferPoint(
+        upperVolumeCalibration, currentLevel, transferredLiters, updated);
+    if (edit != HWC::UPPER_VOLUME_EDIT_OK) {
+        localWebServer.send(409, "text/plain; charset=utf-8", "Nový bod odporuje dosavadní kalibrační křivce nebo zadaným údajům. Kalibrace nebyla změněna."); return;
+    }
+    if (!upperVolumeStore.save(updated)) {
+        markUpperVolumeStoreUncertain();
+        localWebServer.send(500, "text/plain; charset=utf-8", "Zápis nebo zpětné ověření selhalo. Stav NVS není jistý; kalibrační operace jsou zablokovány do restartu a ověřeného načtení."); return;
+    }
+    upperVolumeCalibration = updated;
+    sendLocalResult("Nový bod kalibrace byl vypočten ze skutečně přepuštěných litrů a aktuální hladiny, uložen a ověřen. Výchozí reference byla spotřebována.");
+}
+
+void appendUpperTankVolume(String& html) {
+    html += "<p><b>Celkový objem vody: </b>";
+    float levelCm = 0.0f;
+    if (!upperVolumeStoreReady || !upperVolumeCalibrationValid || upperVolumeCalibrationCorrupt) {
+        html += "nedostupný (kalibraci nelze ověřit)";
+    } else if (!upperVolumeCalibration.absoluteAnchorKnown || upperVolumeCalibration.pointCount == 0) {
+        html += "nedostupný (chybí první objemový bod)";
+    } else if (!currentUpperLevelForVolumeCalibration(levelCm)) {
+        html += "nedostupný (chybí platná aktuální hladina)";
+    } else {
+        const HWC::UpperTankVolumeResult volume = HWC::estimateUpperTankVolume(levelCm, upperVolumeCalibration);
+        if (volume.status == HWC::UPPER_VOLUME_EXACT || volume.status == HWC::UPPER_VOLUME_INTERPOLATED) {
+            html += String(volume.liters, 1);
+            html += volume.status == HWC::UPPER_VOLUME_EXACT ? " l (kalibrační bod)" : " l (odhad mezi body)";
+        } else {
+            html += "nedostupný (mimo kalibrovaný rozsah)";
+        }
+    }
+    html += "</p>";
+}
+
 void handleLocalRoot() {
     if (!requireLocalAuth()) return;
     String h = "<!doctype html><html lang='cs'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>";
@@ -283,7 +482,9 @@ void handleLocalRoot() {
     HWC::appendWaterLevelSketch(h, "Horní nádrž", false, levelValid,
                                 lastUpperReading.result.calibratedLevelCm,
                                 upperProtectionConfigValid ? upperTankLimits.usableDepthCm : 0.0f);
-    h += "</div><p>Hladina pro ochranu: ";
+    h += "</div>";
+    appendUpperTankVolume(h);
+    h += "<p>Hladina pro ochranu: ";
     if (HWC::sensorConfigUsableForLevelMeasurement(upperSensorConfigState) &&
         haveUpperReading && lastUpperReading.result.status == HWC::SENSOR_MATH_OK) {
         h += String(lastUpperReading.result.calibratedLevelCm, 1) + " cm (elektrický přepočet platný)";
@@ -313,6 +514,37 @@ void handleLocalRoot() {
         h += "<h3>Servisní obnova elektrického nastavení horního snímače</h3><p class='warn'>Použijte pouze po nezávislém fyzickém změření skutečné hladiny. Měřítko musí být určeno z ověřené kalibrace; posun se vypočítá z aktuálního surového měření a referenční hladiny.</p><form method='post' action='/sensor-recovery'><label>Ověřené měřítko (0,5–1,5)</label><input name='scale' type='number' min='0.5' max='1.5' step='0.001' required><label>Skutečná hladina změřená nezávislou metodou (cm)</label><input name='reference' type='number' min='0' max='2000' step='0.1' required><label><input style='width:auto' type='checkbox' name='physical' value='yes' required> Potvrzuji fyzické změření hladiny nezávislou referencí a správné přiřazení horního snímače.</label><button type='submit'>Obnovit elektrické nastavení horního snímače</button></form>";
     }
     h += "</section>";
+    h += "<section><details><summary><b>Objemová kalibrace horní nádrže</b></summary>";
+    if (!upperVolumeStoreReady) h += "<p class='warn'>NVS úložiště objemové kalibrace není dostupné.</p>";
+    else if (upperVolumeCalibrationCorrupt) {
+        h += "<p class='warn'>Záznam objemové kalibrace je poškozený. Automatické přepsání je zakázáno; objem není důvěryhodný. Servisní reset odstraní pouze tento poškozený záznam. Všechny kalibrační body budou ztraceny a nový absolutní kotevní bod bude povinný.</p>";
+        h += "<form method='post' action='/volume-corrupt-reset'><label><input style='width:auto' type='checkbox' name='physical' value='yes' required> Potvrzuji, že přijímám úplnou ztrátu poškozené objemové kalibrace a následně zadám nový absolutní objem ověřený nezávislým fyzickým měřením.</label><button type='submit'>SERVISNĚ ODSTRANIT POŠKOZENOU OBJEMOVOU KALIBRACI</button></form>";
+    }
+    else if (!upperVolumeCalibration.pointCount) h += "<p class='warn'>Objemová kalibrace není nastavena. Zadejte nejprve jeden absolutní referenční bod.</p>";
+    else {
+        h += "<p>Počet bodů: " + String(upperVolumeCalibration.pointCount) + ". Absolutní objem: ";
+        h += upperVolumeCalibration.absoluteAnchorKnown ? "OVĚŘENÝ" : "NEOVĚŘENÝ";
+        h += "</p><table border='1' cellpadding='5'><tr><th>Výška (cm)</th><th>Objem (l)</th></tr>";
+        for (size_t i = 0; i < upperVolumeCalibration.pointCount; ++i) {
+            h += "<tr><td>" + String(upperVolumeCalibration.points[i].levelCm, 1) + "</td><td>" + String(upperVolumeCalibration.points[i].volumeLiters, 1) + "</td></tr>";
+        }
+        h += "</table>";
+        if (upperVolumeCalibration.transferReferenceValid) {
+            h += "<p class='warn'>Ruční úprava tabulky je dočasně zablokována, protože je uložená výchozí reference přepouštění. Nejprve dokončete kalibrační transfer nebo referenci výslovně zrušte.</p>";
+        } else {
+            h += "<h4>Ruční úprava kalibrační tabulky</h4><p>Nový bod se vloží podle výšky. Pokud zadáte již existující výšku, její objem se nahradí. Ostatní body zůstanou zachovány; křivka musí zůstat přísně vzestupná.</p><form method='post' action='/volume-point'><label>Výška bodu (cm)</label><input name='level' type='number' min='0' max='2000' step='0.1' required><label>Skutečný absolutní objem v této výšce (l)</label><input name='liters' type='number' min='0' max='100000' step='0.1' required><label><input style='width:auto' type='checkbox' name='physical' value='yes' required> Potvrzuji fyzické ověření obou hodnot.</label><button type='submit'>Přidat / upravit bod</button></form>";
+        }
+    }
+    if (!upperVolumeCalibrationCorrupt && upperVolumeCalibration.pointCount == 0) {
+        h += "<form method='post' action='/volume-anchor'><label>Skutečný absolutní objem při aktuální hladině (l)</label><input name='liters' type='number' min='0' max='100000' step='0.1' required><label><input style='width:auto' type='checkbox' name='physical' value='yes' required> Potvrzuji fyzické ověření aktuální hladiny a skutečného absolutního objemu.</label><button type='submit'>Uložit první bod a výchozí stav</button></form>";
+    } else if (!upperVolumeCalibrationCorrupt && upperVolumeCalibration.absoluteAnchorKnown) {
+        if (!upperVolumeCalibration.transferReferenceValid) {
+            h += "<p>Postup po krocích: před přepouštěním uložte výchozí stav horní nádrže. Po skončení zadejte skutečné litry přepuštěné podle ESP32 #1. Mezi uložením reference a dokončením přepouštění nesmí dojít k jinému přítoku ani odběru.</p><form method='post' action='/volume-reference'><label><input style='width:auto' type='checkbox' name='physical' value='yes' required> Potvrzuji, že před přepouštěním není žádný nepočítaný přítok ani odběr a že ukládám výchozí stav.</label><button type='submit'>Uložit výchozí stav před přepouštěním</button></form>";
+        } else {
+            h += "<p>Výchozí reference: " + String(upperVolumeCalibration.transferReferenceLevelCm, 1) + " cm / " + String(upperVolumeCalibration.transferReferenceVolumeLiters, 1) + " l. Po přepouštění zadejte skutečný přírůstek z historie transferu ESP32 #1. Pokud transfer neproběhl nebo došlo k jinému přítoku/odběru, referenci nejprve zrušte.</p><form method='post' action='/volume-transfer'><label>Skutečný přírůstek dolní nádrže (l)</label><input name='liters' type='number' min='0.1' max='100000' step='0.1' required><label><input style='width:auto' type='checkbox' name='physical' value='yes' required> Potvrzuji správný údaj z ESP32 #1 a že mezi referencí a nynější hladinou nedošlo k jinému přítoku ani odběru.</label><button type='submit'>Vypočítat a uložit nový kalibrační bod</button></form><form method='post' action='/volume-reference-cancel'><label><input style='width:auto' type='checkbox' name='physical' value='yes' required> Potvrzuji zrušení neplatné nebo nepoužité reference.</label><button type='submit'>Zrušit výchozí referenci</button></form>";
+        }
+    }
+    h += "<p class='warn'>Objemová kalibrace slouží pouze k zobrazení objemu. Neovlivňuje ochranu čerpadla ani řízení ventilů. Mimo kalibrovaný rozsah se objem neextrapoluje.</p></details></section>";
     h += "<section><h3>Nouzový režim horního čerpadla</h3><p>Nouzové povolení se po restartu neobnovuje. Před potvrzením fyzicky ověřte, že je v nádrži dostatek vody pro bezpečný provoz; během provozu hladinu průběžně kontrolujte.</p>";
     if (!upperPumpProtectionState.emergencyModeActive) h += "<form method='post' action='/pump-emergency'><input type='hidden' name='mode' value='enable'><label><input style='width:auto' type='checkbox' name='physical' value='yes' required> Potvrzuji, že jsem fyzicky zkontroloval hladinu horní nádrže a je bezpečná pro provoz čerpadla. Přebírám průběžnou kontrolu hladiny.</label><button type='submit'>NOUZOVĚ POVOLIT HORNÍ ČERPADLO</button></form>";
     else h += "<form method='post' action='/pump-emergency'><input type='hidden' name='mode' value='disable'><button type='submit'>Ukončit nouzový režim</button></form>";
@@ -327,7 +559,7 @@ void handleLocalRoot() {
         else h += ETH.linkUp() ? "Čeká se na DHCP" : "Fyzický link je odpojen";
         h += "</p>";
     }
-    h += "<p>Ovládací web je dostupný přes Ethernet i Wi-Fi. REV105 Core 3 – stolní zkouška.</p></section>";
+    h += "<p>Ovládací web je dostupný přes Ethernet i Wi-Fi. REV106 Core 3 – stolní zkouška.</p></section>";
     h += serviceApActive ? "<p>Servisní AP je zapnutý.</p>" : "<p>Servisní AP je vypnutý.</p>";
     h += "<section><h3>Domácí Wi-Fi</h3><p>";
     if (wifiStaDisabled) {
@@ -776,6 +1008,12 @@ void startLocalWeb() {
     localWebServer.on("/wifi", HTTP_POST, handleLocalWifi);
     localWebServer.on("/wifi-mode", HTTP_POST, handleLocalWifiMode);
     localWebServer.on("/local-limits", HTTP_POST, handleLocalLimits);
+    localWebServer.on("/volume-anchor", HTTP_POST, handleLocalVolumeAnchor);
+    localWebServer.on("/volume-corrupt-reset", HTTP_POST, handleLocalVolumeCorruptReset);
+    localWebServer.on("/volume-point", HTTP_POST, handleLocalVolumePoint);
+    localWebServer.on("/volume-reference", HTTP_POST, handleLocalVolumeReference);
+    localWebServer.on("/volume-reference-cancel", HTTP_POST, handleLocalVolumeReferenceCancel);
+    localWebServer.on("/volume-transfer", HTTP_POST, handleLocalVolumeTransfer);
     localWebServer.on("/sensor-recovery", HTTP_POST, handleLocalSensorRecovery);
     localWebServer.on("/pump-emergency", HTTP_POST, handleLocalPumpEmergency);
     localWebServer.on("/update", HTTP_POST, handleLocalUpdateComplete, handleLocalUpdateUpload);
@@ -932,7 +1170,7 @@ void setup() {
         HwcPins::Esp32_2::PUMP_SAFETY_OUTPUTS_ENABLED, writePumpSafetyRelayLevel);
     delay(250);
     Serial.println();
-    Serial.println("HOME WATER CONTROLLER - ESP32 #2 / REV105 CORE 3 BENCH");
+    Serial.println("HOME WATER CONTROLLER - ESP32 #2 / REV106 CORE 3 BENCH");
     Serial.println("SENSOR ACQUISITION STAGE - UPPER PUMP SAFETY RELAY ENABLED");
     Serial.printf("W5500 pin plan: SCK=%u MISO=%u MOSI=%u CS=%u RST=%u\n",
                   HwcPins::Esp32_2::W5500_SCK, HwcPins::Esp32_2::W5500_MISO,
@@ -1001,6 +1239,26 @@ void setup() {
         upperSafetyStorageReady = false;
         Serial.println("ERROR: upper pump safety-state NVS unavailable; pump permit remains blocked.");
     }
+    upperVolumeStoreReady = upperVolumeStore.begin();
+    if (upperVolumeStoreReady) {
+        if (upperVolumeStore.hasRecord()) {
+            upperVolumeCalibrationValid = upperVolumeStore.load(upperVolumeCalibration);
+            upperVolumeCalibrationCorrupt = !upperVolumeCalibrationValid;
+            Serial.println(upperVolumeCalibrationValid
+                ? "Upper tank volume calibration loaded and checksum verified."
+                : "ERROR: upper tank volume calibration is corrupt; automatic overwrite blocked.");
+        } else {
+            upperVolumeCalibration = HWC::emptyUpperTankVolumeCalibration();
+            upperVolumeCalibrationValid = true;
+            upperVolumeCalibrationCorrupt = false;
+            Serial.println("Upper tank volume calibration is not configured; absolute anchor required.");
+        }
+    } else {
+        upperVolumeCalibrationValid = false;
+        upperVolumeCalibrationCorrupt = false;
+        Serial.println("ERROR: upper tank volume calibration NVS unavailable.");
+    }
+
     discoverWaterTemperatureSensor(millis());
 
     if (Network.begin()) {
