@@ -101,3 +101,9 @@ Wi-Fi, obnov stránku a zkontroluj stav „Vypnuto“. Ověř zachování volby 
 restartu. S odpojeným výstupem čerpadla pak na více než 30 sekund odpoj
 Ethernet a zkontroluj servisní AP. Po návratu Ethernetu lze domácí Wi-Fi
 zapnout bez opětovného zadávání hesla.
+
+### Výsledek zkoušky REV102
+
+Uživatel potvrdil funkční stolní zkoušku ESP32 #2 podle výše uvedeného
+postupu, včetně přepínání domácí Wi-Fi a záložního servisního AP.
+Provozní ověření čidla a výstupu čerpadla zůstává samostatným krokem.
