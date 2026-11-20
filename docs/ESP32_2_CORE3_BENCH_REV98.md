@@ -73,3 +73,17 @@ Stolní zkouška REV100 s odpojeným výstupem čerpadla:
 4. Ověř stejný postup při startu bez obou připojení.
 
 REV100 je stolní sestava pro ověření těchto změn na desce.
+
+## REV101
+
+Na jedné stolní jednotce REV100 po restartu ohlásila neúspěšnou inicializaci
+W5500. REV101 spouští ovladač mimo řídicí smyčku, po krátké prodlevě a
+řízeném hardwarovém resetu. SPI používá 10 MHz. Při chybě se pokus zopakuje
+nejvýše dvakrát, pokud předchozí ovladač šel uklidit. Web a sériový monitor
+rozlišují inicializaci modulu, fyzický link a čekání na DHCP. Síťové
+podmínky servisního AP zůstávají stejné jako v REV100.
+
+Při zkoušce s odpojeným výstupem čerpadla nahraj sestavu přes funkční
+ovládací web, zkontroluj IP adresu W5500 a ověř studený start s již
+zapojeným síťovým kabelem. Jestli inicializace dál selhává, zachyť výpis
+na 115200 baud od prvního řádku „W5500 initialization attempt“.

@@ -20,6 +20,7 @@
 #include "src/UpperTankProtection.h"
 #include "src/PumpSafetyRelayOutput.h"
 #include <ETH.h>
+#include <atomic>
 #include <Network.h>
 #include "src/WifiStaCredentialStore.h"
 #include <WiFi.h>
@@ -88,7 +89,8 @@ uint32_t lastServiceApAttemptMs = 0;
 bool serviceApActive = false;
 constexpr uint32_t MANAGEMENT_LINK_GRACE_MS = 30000U;
 constexpr uint32_t WIFI_RETRY_INTERVAL_MS = 30000U;
-bool ethernetStarted = false;
+enum class EthernetStartup { Pending, Ready, Failed };
+std::atomic<EthernetStartup> ethernetStartup{EthernetStartup::Pending};
 IPAddress reportedEthernetIp;
 HWC::NvsUpperTankLimitsStore upperLimitsStore("hwc_upperlimits");
 HWC::NvsUpperTankProtectionStore upperSafetyStore("hwc_up_safety");
@@ -439,14 +441,16 @@ void handleLocalRoot() {
     }
     h += "<p>Teplota je pouze informativní. Nemá vliv na ochranu čerpadla ani řízení ventilů.</p></section>";
     h += "<section><h3>Síťové připojení W5500</h3><p>Stav Ethernetu: ";
-    if (ethernetStarted && ETH.linkUp() && ETH.hasIP()) {
+    const EthernetStartup startup = ethernetStartup.load();
+    if (startup == EthernetStartup::Ready && ETH.linkUp() && ETH.hasIP()) {
         h += "DHCP adresa přidělena</p><p>IP adresa: <b>" + ETH.localIP().toString() + "</b></p>";
     } else {
-        h += !ethernetStarted ? "Inicializace W5500 selhala" :
-             (ETH.linkUp() ? "Čeká se na DHCP" : "Fyzický link je odpojen");
+        if (startup == EthernetStartup::Pending) h += "Probíhá inicializace W5500";
+        else if (startup == EthernetStartup::Failed) h += "Inicializace W5500 selhala";
+        else h += ETH.linkUp() ? "Čeká se na DHCP" : "Fyzický link je odpojen";
         h += "</p>";
     }
-    h += "<p>Ovládací web je dostupný přes Ethernet i Wi-Fi. REV100 Core 3 – stolní zkouška.</p></section>";
+    h += "<p>Ovládací web je dostupný přes Ethernet i Wi-Fi. REV101 Core 3 – stolní zkouška.</p></section>";
     h += serviceApActive ? "<p>Servisní AP je zapnutý.</p>" : "<p>Servisní AP je vypnutý.</p>";
     h += "<section><h3>Domácí Wi-Fi</h3><p>";
     if (WiFi.STA.connected() && WiFi.STA.hasIP()) {
@@ -962,7 +966,7 @@ void maintainLocalWifi(uint32_t now) {
 void maintainServiceAp(uint32_t now) {
     if (!localWebReady) return;
     const bool wifiReady = WiFi.STA.connected() && WiFi.STA.hasIP();
-    const bool ethernetReady = ethernetStarted && ETH.linkUp() && ETH.hasIP();
+    const bool ethernetReady = ethernetStartup.load() == EthernetStartup::Ready && ETH.linkUp() && ETH.hasIP();
     if (wifiReady || ethernetReady) {
         lastManagementLinkMs = now;
         if (serviceApActive && WiFi.enableAP(false)) {
@@ -985,17 +989,47 @@ void maintainServiceAp(uint32_t now) {
     }
 }
 
+void initializeEthernet(void*) {
+    // The reset and driver startup may wait for hardware. Keep them off the control loop.
+    delay(500);
+    for (unsigned attempt = 1; attempt <= 3; ++attempt) {
+        Serial.printf("W5500 initialization attempt %u/3.\n", attempt);
+        pinMode(HwcPins::Esp32_2::W5500_RST, OUTPUT);
+        digitalWrite(HwcPins::Esp32_2::W5500_RST, LOW);
+        delay(50);
+        digitalWrite(HwcPins::Esp32_2::W5500_RST, HIGH);
+        delay(200);
+
+        // Firmware controls reset above. INT is unwired; core 3.3.7 polls RX.
+        if (ETH.begin(ETH_PHY_W5500, 1, HwcPins::Esp32_2::W5500_CS, -1, -1,
+                      SPI3_HOST, HwcPins::Esp32_2::W5500_SCK, HwcPins::Esp32_2::W5500_MISO,
+                      HwcPins::Esp32_2::W5500_MOSI, 10) && ETH.netif() != nullptr) {
+            ethernetStartup.store(EthernetStartup::Ready);
+            Serial.println("W5500 driver initialized.");
+            vTaskDelete(nullptr);
+            return;
+        }
+
+        Serial.println("W5500 driver initialization failed.");
+        if (attempt < 3) {
+            ETH.end();
+            if (ETH.netif() != nullptr) break;
+            delay(2500);
+        }
+    }
+    ethernetStartup.store(EthernetStartup::Failed);
+    vTaskDelete(nullptr);
+}
+
 void startEthernet() {
-    // W5500 INT is not wired. Core 3.3.7 polls RX with irq = -1.
-    ethernetStarted = ETH.begin(
-        ETH_PHY_W5500, 1, HwcPins::Esp32_2::W5500_CS, -1, HwcPins::Esp32_2::W5500_RST,
-        SPI3_HOST, HwcPins::Esp32_2::W5500_SCK, HwcPins::Esp32_2::W5500_MISO,
-        HwcPins::Esp32_2::W5500_MOSI);
-    if (!ethernetStarted) Serial.println("W5500 driver initialization failed.");
+    if (xTaskCreatePinnedToCore(initializeEthernet, "hwc-eth-init", 5120, nullptr, 1, nullptr, 0) != pdPASS) {
+        ethernetStartup.store(EthernetStartup::Failed);
+        Serial.println("W5500 initialization task could not start.");
+    }
 }
 
 void reportEthernetAddress() {
-    if (!ethernetStarted) return;
+    if (ethernetStartup.load() != EthernetStartup::Ready) return;
     const IPAddress ip = ETH.linkUp() && ETH.hasIP() ? ETH.localIP() : IPAddress();
     if (ip == reportedEthernetIp) return;
     reportedEthernetIp = ip;
@@ -1030,7 +1064,7 @@ void setup() {
         HwcPins::Esp32_2::PUMP_SAFETY_OUTPUTS_ENABLED, writePumpSafetyRelayLevel);
     delay(250);
     Serial.println();
-    Serial.println("HOME WATER CONTROLLER - ESP32 #2 / REV100 CORE 3 BENCH");
+    Serial.println("HOME WATER CONTROLLER - ESP32 #2 / REV101 CORE 3 BENCH");
     Serial.println("SENSOR ACQUISITION STAGE - UPPER PUMP SAFETY RELAY ENABLED");
     Serial.printf("W5500 pin plan: SCK=%u MISO=%u MOSI=%u CS=%u RST=%u\n",
                   HwcPins::Esp32_2::W5500_SCK, HwcPins::Esp32_2::W5500_MISO,
