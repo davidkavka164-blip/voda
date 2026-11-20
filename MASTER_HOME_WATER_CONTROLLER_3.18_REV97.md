@@ -18,7 +18,7 @@ Tento dokument aktualizuje stav sítě a ověření [masteru 3.17 / REV94](MASTE
 |---|---|
 | ESP32 #1 – servisní AP a ovládací web z domácí Wi-Fi | Uživatel ověřil přístup na desce. |
 | ESP32 #1 – Ethernet v REV97 | Uživatel ověřil přihlášený `/status` i obnovení stránky po vytažení a zapojení kabelu bez restartu. |
-| ESP32 #1 – aktualizace OTA | K dispozici je sestavený a ověřený aplikační soubor. Z dosavadních zpráv není jisté, zda byl REV97 nahrán přes OTA nebo USB. |
+| ESP32 #1 – aktualizace OTA | Uživatel potvrdil úspěšné nahrání REV97 přes OTA a po aktualizaci ověřil ethernetový přehled. |
 | ESP32 #2 – AP, Wi-Fi STA, W5500, OTA | Sestavení prošlo. Souběh AP a STA, přihlášení přes W5500, návrat spojení a OTA ještě neprošly potvrzenou zkouškou na desce. |
 | Software REV97 | Oba sketchy přeloženy s core 1.0.6. Prošlo 81 nativních testovacích programů, statické kontroly a 17 testů v Pythonu. |
 | Čidla, relé, ventily a čerpadla | Provozní ověření zůstává otevřené. Úspěšná síťová zkouška nepotvrzuje elektrické zapojení ani funkci ochran na konkrétní instalaci. |

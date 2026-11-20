@@ -27,7 +27,7 @@ Ethernetová stránka používá účet `admin` dané jednotky. Ovládací formu
 
 Překlad obou sketchů pro **ESP32 Dev Module** ověřen s Arduino-ESP32 1.0.6 a výše uvedenými knihovnami.
 
-Na ESP32 #1 je ověřen servisní AP, ovládací web z domácí Wi-Fi a ethernetový přehled v REV97 včetně návratu po odpojení kabelu. Zkoušky na ESP32 #2 a potvrzení způsobu nahrání přes OTA jsou vedené v masteru.
+Na ESP32 #1 je ověřen servisní AP, ovládací web z domácí Wi-Fi a ethernetový přehled v REV97 včetně návratu po odpojení kabelu. Uživatel potvrdil i úspěšné nahrání REV97 přes OTA na ESP32 #1. Zkoušky ESP32 #2 jsou vedené v masteru.
 
 ## Historické poznámky k dřívějším revizím
 
