@@ -4,6 +4,8 @@
  * Upper pump safety relay is enabled and follows the local pump protection permit.
  */
 #include "src/HardwarePins.h"
+#include "src/WaterLevelSketch.h"
+#include "src/SampleFreshness.h"
 #include "src/HttpOriginPolicy.h"
 #include "src/SensorMath.h"
 #include "src/SensorConfig.h"
@@ -257,7 +259,9 @@ void sendLocalResult(const String& message) {
 void handleLocalRoot() {
     if (!requireLocalAuth()) return;
     String h = "<!doctype html><html lang='cs'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>";
-    h += "<title>HWC – horní nádrž</title><style>body{font:16px Arial;max-width:800px;margin:20px auto;padding:0 14px;background:#f4f6f8;color:#17202a}section{background:#fff;padding:16px;margin:14px 0;border-radius:10px}input{box-sizing:border-box;width:100%;padding:9px;margin:5px 0 12px}button{padding:10px 16px}.warn{color:#9b1c1c}</style></head><body><h1>HOME WATER CONTROLLER</h1><h2>ESP32 #2 – ochrana horního čerpadla</h2>";
+    h += "<title>HWC – horní nádrž</title><style>body{font:16px Arial;max-width:800px;margin:20px auto;padding:0 14px;background:#f4f6f8;color:#17202a}section{background:#fff;padding:16px;margin:14px 0;border-radius:10px}input{box-sizing:border-box;width:100%;padding:9px;margin:5px 0 12px}button{padding:10px 16px}.warn{color:#9b1c1c}</style>";
+    h += HWC::WATER_LEVEL_SKETCH_CSS;
+    h += "</head><body><h1>HOME WATER CONTROLLER</h1><h2>ESP32 #2 – ochrana horního čerpadla</h2>";
     h += "<section><h3>Teplota vody – DS18B20</h3>";
     if (HWC::isWaterTemperatureFresh(waterTemperatureReading, millis(), WATER_TEMPERATURE_MAX_AGE_MS)) {
         h += "<p>Aktuální teplota: <b>" + String(waterTemperatureReading.temperatureC, 2) + " °C</b></p>";
@@ -272,7 +276,14 @@ void handleLocalRoot() {
         else h += "<p class='warn'>Čidlo zatím nebylo inicializováno.</p>";
     }
     h += "<p>Teplota je pouze informativní. Nemá vliv na ochranu čerpadla ani řízení ventilů.</p></section>";
-    h += "<section><h3>Ochrana čerpadla proti chodu nasucho</h3><p>Hladina pro ochranu: ";
+    const bool levelValid = HWC::sampleIsFresh(haveUpperReading, millis(), lastReportMs, 5000U) &&
+        lastUpperReading.result.status == HWC::SENSOR_MATH_OK &&
+        HWC::sensorConfigUsableForLevelMeasurement(upperSensorConfigState);
+    h += "<section><h3>Ochrana čerpadla proti chodu nasucho</h3><div class='level-sketches'>";
+    HWC::appendWaterLevelSketch(h, "Horní nádrž", false, levelValid,
+                                lastUpperReading.result.calibratedLevelCm,
+                                upperProtectionConfigValid ? upperTankLimits.usableDepthCm : 0.0f);
+    h += "</div><p>Hladina pro ochranu: ";
     if (HWC::sensorConfigUsableForLevelMeasurement(upperSensorConfigState) &&
         haveUpperReading && lastUpperReading.result.status == HWC::SENSOR_MATH_OK) {
         h += String(lastUpperReading.result.calibratedLevelCm, 1) + " cm (elektrický přepočet platný)";
@@ -316,7 +327,7 @@ void handleLocalRoot() {
         else h += ETH.linkUp() ? "Čeká se na DHCP" : "Fyzický link je odpojen";
         h += "</p>";
     }
-    h += "<p>Ovládací web je dostupný přes Ethernet i Wi-Fi. REV104 Core 3 – stolní zkouška.</p></section>";
+    h += "<p>Ovládací web je dostupný přes Ethernet i Wi-Fi. REV105 Core 3 – stolní zkouška.</p></section>";
     h += serviceApActive ? "<p>Servisní AP je zapnutý.</p>" : "<p>Servisní AP je vypnutý.</p>";
     h += "<section><h3>Domácí Wi-Fi</h3><p>";
     if (wifiStaDisabled) {
@@ -921,7 +932,7 @@ void setup() {
         HwcPins::Esp32_2::PUMP_SAFETY_OUTPUTS_ENABLED, writePumpSafetyRelayLevel);
     delay(250);
     Serial.println();
-    Serial.println("HOME WATER CONTROLLER - ESP32 #2 / REV104 CORE 3 BENCH");
+    Serial.println("HOME WATER CONTROLLER - ESP32 #2 / REV105 CORE 3 BENCH");
     Serial.println("SENSOR ACQUISITION STAGE - UPPER PUMP SAFETY RELAY ENABLED");
     Serial.printf("W5500 pin plan: SCK=%u MISO=%u MOSI=%u CS=%u RST=%u\n",
                   HwcPins::Esp32_2::W5500_SCK, HwcPins::Esp32_2::W5500_MISO,

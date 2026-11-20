@@ -24,3 +24,15 @@ nech výstupy čerpadel a ventilů odpojené.
 
 - [ESP32 #1 – OTA REV104](../ota/ESP32_1_REV104_CORE3_BENCH.bin)
 - [ESP32 #2 – OTA REV104](../ota/ESP32_2_REV104_CORE3_BENCH.bin)
+
+## REV105 – nákresy hladin
+
+ESP32 #1 zobrazuje schematický průřez studnou a dolní nádrží. ESP32 #2
+zobrazuje horní nádrž v části ochrany čerpadla. Modrá vyplněná část odpovídá
+změřené výšce proti využitelné hloubce nebo maximu dolní nádrže. Číslo je
+v centimetrech. Nákres vyžaduje platný a čerstvý vzorek s ověřeným nastavením
+snímače. Zastaralý nebo neplatný vzorek označí jako nedostupný. Pokud chybí
+rozsah nebo měření leží mimo něj, číslo nemá modrou výplň.
+
+- [ESP32 #1 – OTA REV105](../ota/ESP32_1_REV105_CORE3_BENCH.bin)
+- [ESP32 #2 – OTA REV105](../ota/ESP32_2_REV105_CORE3_BENCH.bin)

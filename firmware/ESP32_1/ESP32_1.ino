@@ -4,6 +4,7 @@
  * Manual and automatic valve paths are relay-driven. Pump safety relays are enabled with the proven standalone-well configuration.
  */
 #include "src/HardwarePins.h"
+#include "src/WaterLevelSketch.h"
 #include "src/HttpOriginPolicy.h"
 #include "src/SampleFreshness.h"
 #include "src/SensorMath.h"
@@ -302,7 +303,9 @@ bool parseUnsignedStrict(const String& text, uint32_t& value) {
 String pageStart(const char* title) {
     String h = "<!doctype html><html lang='cs'><head><meta charset='utf-8'>";
     h += "<meta name='viewport' content='width=device-width,initial-scale=1'>";
-    h += "<title>Home Water Controller</title><style>body{font:16px Arial;max-width:900px;margin:20px auto;padding:0 14px;background:#f4f6f8;color:#17202a}section{background:white;padding:16px;margin:14px 0;border-radius:10px}input,textarea{box-sizing:border-box;width:100%;padding:9px;margin:5px 0 12px}button{padding:10px 16px}small{color:#555}.warn{color:#9b1c1c}</style></head><body><h1>Home Water Controller</h1><h2>";
+    h += "<title>Home Water Controller</title><style>body{font:16px Arial;max-width:900px;margin:20px auto;padding:0 14px;background:#f4f6f8;color:#17202a}section{background:white;padding:16px;margin:14px 0;border-radius:10px}input,textarea{box-sizing:border-box;width:100%;padding:9px;margin:5px 0 12px}button{padding:10px 16px}small{color:#555}.warn{color:#9b1c1c}</style>";
+    h += HWC::WATER_LEVEL_SKETCH_CSS;
+    h += "</head><body><h1>Home Water Controller</h1><h2>";
     h += title; h += "</h2>"; return h;
 }
 
@@ -873,7 +876,7 @@ void handleRoot() {
         else h += ETH.linkUp() ? "Čeká se na DHCP" : "Fyzický link je odpojen";
         h += "</p>";
     }
-    h += "<p>Ovládací web je dostupný přes Ethernet i Wi-Fi. REV104 Core 3 – stolní zkouška.</p>";
+    h += "<p>Ovládací web je dostupný přes Ethernet i Wi-Fi. REV105 Core 3 – stolní zkouška.</p>";
     h += apMode ? "<p>Servisní AP je zapnutý.</p>" : "<p>Servisní AP je vypnutý.</p>";
     if (apMode) {
         h += "<p>Adresa AP: " + WiFi.softAPIP().toString() + "<br>AP: <b>" + htmlEscape(apName) + "</b></p>";
@@ -881,7 +884,19 @@ void handleRoot() {
     h += "<p>Průměr studny: "; h += String(wellGeometry.internalDiameterCm,1);
     h += " cm; využitelná hloubka: "; h += String(wellGeometry.usableDepthCm,1); h += " cm</p><p>Kalibračních bodů: ";
     h += String(wellCalibration.pointCount); h += "</p><p class='warn'>Ruční i automatický transfer ovládá ventily přes relé GPIO 16/17. Čerpadla běžně spouští a vypíná vlastní tlaková automatika; ESP32 přes samostatná bezpečnostní relé povoluje nebo přerušuje napájení čerpadel (studna GPIO 25, dolní nádrž GPIO 32).</p></section>";
-    h += "<section><h3>Aktuální měření</h3><p><b>Studna:</b> ";
+    const uint32_t levelNow = millis();
+    const bool wellLevelValid = HWC::sampleIsFresh(haveWellReading, levelNow, lastWellReadingMs, 5000U) &&
+        lastWellReading.result.status == HWC::SENSOR_MATH_OK &&
+        HWC::sensorConfigUsableForLevelMeasurement(wellSensorConfigState);
+    const bool lowerLevelValid = HWC::sampleIsFresh(haveLowerTankReading, levelNow, lastLowerTankReadingMs, 5000U) &&
+        lastLowerTankReading.result.status == HWC::SENSOR_MATH_OK &&
+        HWC::sensorConfigUsableForLevelMeasurement(lowerSensorConfigState);
+    h += "<section><h3>Aktuální měření</h3><div class='level-sketches'>";
+    HWC::appendWaterLevelSketch(h, "Studna", true, wellLevelValid,
+                                lastWellReading.result.calibratedLevelCm, wellGeometry.usableDepthCm);
+    HWC::appendWaterLevelSketch(h, "Dolní nádrž", false, lowerLevelValid,
+                                lastLowerTankReading.result.calibratedLevelCm, HWC::LOWER_TANK_MAX_LEVEL_CM);
+    h += "</div><p><b>Studna:</b> ";
     if (!haveWellReading || lastWellReading.result.status != HWC::SENSOR_MATH_OK) {
         h += "neplatné nebo nedostupné měření";
     } else if (HWC::sensorConfigUsableForLevelMeasurement(wellSensorConfigState)) {
@@ -2040,7 +2055,7 @@ void setup() {
         writeValveRelayLevel);
     delay(250);
     Serial.println();
-    Serial.println("HOME WATER CONTROLLER - ESP32 #1 / REV104 CORE 3 BENCH");
+    Serial.println("HOME WATER CONTROLLER - ESP32 #1 / REV105 CORE 3 BENCH");
     Serial.println("DEVELOPMENT BUILD - VALVE RELAYS AND PUMP SAFETY OUTPUTS ENABLED");
     // Relay pins were initialized OFF before the startup delay above.
     Serial.printf("Valve relay driver: %s; well GPIO=%u, upper GPIO=%u, active-high; relay board supply 5V\n",
