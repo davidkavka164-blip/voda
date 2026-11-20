@@ -87,3 +87,17 @@ Při zkoušce s odpojeným výstupem čerpadla nahraj sestavu přes funkční
 ovládací web, zkontroluj IP adresu W5500 a ověř studený start s již
 zapojeným síťovým kabelem. Jestli inicializace dál selhává, zachyť výpis
 na 115200 baud od prvního řádku „W5500 initialization attempt“.
+
+## REV102
+
+Přehled ESP32 #2 má samostatné ovládání domácí Wi-Fi. Volba **Vypnout
+domácí Wi-Fi** vypne režim STA a uloží nastavení přes restart. Uložený
+SSID a heslo zůstanou k dispozici pro **Zapnout domácí Wi-Fi**. Oba režimy
+lze změnit z přihlášeného webu přes W5500. Servisní AP zůstává vázaný na
+výpadek obou hlavních připojení po 30 sekundách.
+
+Při stolní zkoušce použij ovládací web na IP adrese W5500. Vypni domácí
+Wi-Fi, obnov stránku a zkontroluj stav „Vypnuto“. Ověř zachování volby po
+restartu. S odpojeným výstupem čerpadla pak na více než 30 sekund odpoj
+Ethernet a zkontroluj servisní AP. Po návratu Ethernetu lze domácí Wi-Fi
+zapnout bez opětovného zadávání hesla.

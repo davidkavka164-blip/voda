@@ -84,6 +84,7 @@ String savedWifiPassword;
 uint32_t lastWifiAttemptMs = 0;
 bool wifiReconnectRequested = false;
 bool wifiAttemptPending = false;
+bool wifiStaDisabled = false;
 uint32_t lastManagementLinkMs = 0;
 uint32_t lastServiceApAttemptMs = 0;
 bool serviceApActive = false;
@@ -450,18 +451,26 @@ void handleLocalRoot() {
         else h += ETH.linkUp() ? "Čeká se na DHCP" : "Fyzický link je odpojen";
         h += "</p>";
     }
-    h += "<p>Ovládací web je dostupný přes Ethernet i Wi-Fi. REV101 Core 3 – stolní zkouška.</p></section>";
+    h += "<p>Ovládací web je dostupný přes Ethernet i Wi-Fi. REV102 Core 3 – stolní zkouška.</p></section>";
     h += serviceApActive ? "<p>Servisní AP je zapnutý.</p>" : "<p>Servisní AP je vypnutý.</p>";
     h += "<section><h3>Domácí Wi-Fi</h3><p>";
-    if (WiFi.STA.connected() && WiFi.STA.hasIP()) {
+    if (wifiStaDisabled) {
+        h += (WiFi.getMode() & WIFI_MODE_STA) ? "Vypíná se." : "Vypnuto.";
+    } else if (WiFi.STA.connected() && WiFi.STA.hasIP()) {
         h += "Připojeno, IP adresa: " + WiFi.localIP().toString();
     } else {
         h += savedWifiSsid.length() ? "Připojení se obnovuje." : "Připojení není nastavené.";
     }
-    h += "</p><form method='post' action='/wifi'><label>Název domácí Wi-Fi (SSID)</label>"
+    h += "</p><form method='post' action='/wifi-mode'>";
+    if (wifiStaDisabled) {
+        h += "<button name='mode' value='on' type='submit'>Zapnout domácí Wi-Fi</button>";
+    } else {
+        h += "<button name='mode' value='off' type='submit'>Vypnout domácí Wi-Fi</button>";
+    }
+    h += "</form><form method='post' action='/wifi'><label>Název domácí Wi-Fi (SSID)</label>"
          "<input name='ssid' maxlength='32' required><label>Heslo Wi-Fi</label>"
          "<input name='password' type='password' maxlength='64'>"
-         "<button type='submit'>Uložit a připojit</button></form></section>";
+         "<button type='submit'>Uložit nastavení Wi-Fi</button></form></section>";
     h += "<section><h3>Bezpečnostní stav</h3><p>Hladina: ";
     if (HWC::sensorConfigUsableForLevelMeasurement(upperSensorConfigState) &&
         haveUpperReading && lastUpperReading.result.status == HWC::SENSOR_MATH_OK) {
@@ -737,6 +746,11 @@ bool copyCStringToCredentialField(const char* source, char* target, size_t capac
 }
 
 void loadLocalWifi() {
+    Preferences settings;
+    if (settings.begin("hwc_wifi", true)) {
+        wifiStaDisabled = settings.getBool("sta_off", false);
+        settings.end();
+    }
     HWC::NvsCredentialBackend backend("hwc_wifi");
     if (!backend.begin()) return;
     HWC::WifiStaCredentialStore store(backend);
@@ -780,7 +794,38 @@ void handleLocalWifi() {
     savedWifiSsid = ssid;
     savedWifiPassword = password;
     wifiReconnectRequested = true;
-    sendLocalResult("Wi-Fi údaje byly uloženy. Jednotka zkusí nové připojení. Přes kabel můžeš výsledek zkontrolovat na přehledu.");
+    sendLocalResult(wifiStaDisabled
+        ? "Wi-Fi údaje byly uloženy. Domácí Wi-Fi je vypnutá. Zapneš ji na přehledu."
+        : "Wi-Fi údaje byly uloženy. Jednotka zkusí nové připojení. Přes kabel můžeš výsledek zkontrolovat na přehledu.");
+}
+
+void handleLocalWifiMode() {
+    if (!requireLocalAuth()) return;
+    const String mode = localWebServer.arg("mode");
+    if (mode != "on" && mode != "off") {
+        localWebServer.send(400, "text/plain; charset=utf-8", "Neplatný režim domácí Wi-Fi.");
+        return;
+    }
+
+    const bool disable = mode == "off";
+    Preferences settings;
+    if (!settings.begin("hwc_wifi", false)) {
+        localWebServer.send(503, "text/plain; charset=utf-8", "Úložiště Wi-Fi není dostupné.");
+        return;
+    }
+    settings.putBool("sta_off", disable);
+    const bool saved = settings.isKey("sta_off") && settings.getBool("sta_off", !disable) == disable;
+    settings.end();
+    if (!saved) {
+        localWebServer.send(500, "text/plain; charset=utf-8", "Uložení režimu Wi-Fi nebylo potvrzené.");
+        return;
+    }
+    wifiStaDisabled = disable;
+    wifiAttemptPending = false;
+    wifiReconnectRequested = true;
+    sendLocalResult(disable
+        ? "Domácí Wi-Fi se vypne. Údaje sítě zůstávají uložené."
+        : "Domácí Wi-Fi je povolená. Pokud jsou uložené údaje, zařízení se zkusí připojit.");
 }
 
 void startLocalWeb() {
@@ -912,6 +957,7 @@ void startLocalWeb() {
     localWebServer.on("/", HTTP_GET, handleLocalRoot);
     localWebServer.on("/status", HTTP_GET, handleLocalRoot);
     localWebServer.on("/wifi", HTTP_POST, handleLocalWifi);
+    localWebServer.on("/wifi-mode", HTTP_POST, handleLocalWifiMode);
     localWebServer.on("/local-limits", HTTP_POST, handleLocalLimits);
     localWebServer.on("/volume-anchor", HTTP_POST, handleLocalVolumeAnchor);
     localWebServer.on("/volume-corrupt-reset", HTTP_POST, handleLocalVolumeCorruptReset);
@@ -930,7 +976,18 @@ void startLocalWeb() {
 }
 
 void maintainLocalWifi(uint32_t now) {
-    if (!localWebReady || savedWifiSsid.length() == 0) return;
+    if (!localWebReady) return;
+    if (wifiStaDisabled) {
+        wifiAttemptPending = false;
+        if ((WiFi.getMode() & WIFI_MODE_STA) &&
+            (wifiReconnectRequested || now - lastWifiAttemptMs >= WIFI_RETRY_INTERVAL_MS)) {
+            lastWifiAttemptMs = now;
+            if (!WiFi.enableSTA(false)) Serial.println("Upper tank Wi-Fi STA could not be disabled; will retry.");
+        }
+        wifiReconnectRequested = false;
+        return;
+    }
+    if (savedWifiSsid.length() == 0) return;
 
     if (wifiReconnectRequested || (!wifiAttemptPending &&
         !(WiFi.STA.connected() && WiFi.STA.hasIP()) &&
@@ -1064,7 +1121,7 @@ void setup() {
         HwcPins::Esp32_2::PUMP_SAFETY_OUTPUTS_ENABLED, writePumpSafetyRelayLevel);
     delay(250);
     Serial.println();
-    Serial.println("HOME WATER CONTROLLER - ESP32 #2 / REV101 CORE 3 BENCH");
+    Serial.println("HOME WATER CONTROLLER - ESP32 #2 / REV102 CORE 3 BENCH");
     Serial.println("SENSOR ACQUISITION STAGE - UPPER PUMP SAFETY RELAY ENABLED");
     Serial.printf("W5500 pin plan: SCK=%u MISO=%u MOSI=%u CS=%u RST=%u\n",
                   HwcPins::Esp32_2::W5500_SCK, HwcPins::Esp32_2::W5500_MISO,
