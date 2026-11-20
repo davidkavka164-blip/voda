@@ -58,6 +58,29 @@ int main() {
     assert(parse(longRequest, r) == PARSE_OK);
     assert(strlen(parameter(r, "points")) == 300);
 
+    // Browsers can send longer Accept and User-Agent values than REV96 accepted.
+    char browserValue[221];
+    memset(browserValue, 'a', sizeof(browserValue) - 1);
+    browserValue[sizeof(browserValue) - 1] = '\0';
+    char browserRequest[1900];
+    snprintf(browserRequest, sizeof(browserRequest),
+             "GET /status HTTP/1.1\r\nHost: 192.168.0.231\r\n"
+             "Accept: %s\r\nUser-Agent: %s\r\nAccept-Language: %s\r\n"
+             "Cookie: %s\r\nReferer: %s\r\nAuthorization: Basic dGVzdA==\r\n\r\n",
+             browserValue, browserValue, browserValue, browserValue, browserValue);
+    assert(strlen(browserRequest) > 1024);
+    assert(parse(browserRequest, r) == PARSE_OK);
+    const char *authorization = 0;
+    assert(findHeader(r, "Authorization", &authorization));
+    assert(strcmp(authorization, "Basic dGVzdA==") == 0);
+
+    char oversized[MAX_HEADER_VALUE + 2];
+    memset(oversized, 'b', sizeof(oversized) - 1);
+    oversized[sizeof(oversized) - 1] = '\0';
+    snprintf(browserRequest, sizeof(browserRequest),
+             "GET /status HTTP/1.1\r\nAccept: %s\r\n\r\n", oversized);
+    assert(parse(browserRequest, r) == PARSE_TOO_LARGE);
+
     puts("PASS: HTTP request parser tests");
     return 0;
 }

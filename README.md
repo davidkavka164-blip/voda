@@ -1,4 +1,6 @@
-# HOME WATER CONTROLLER — vývojový balíček 1.00 REV96
+# HOME WATER CONTROLLER — vývojový balíček 1.00 REV97
+
+REV97 upravuje čtení HTTP hlaviček prohlížečů na ethernetovém přehledu obou jednotek. Aktualizace OTA se spouští z ovládacího webu přes Wi-Fi.
 
 ## Otevření v Arduino IDE
 

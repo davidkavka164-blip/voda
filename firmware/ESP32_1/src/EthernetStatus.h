@@ -122,7 +122,7 @@ private:
         size_t used = 0;
         const uint32_t started = millis();
         bool complete = false;
-        while (used < sizeof(bytes) && millis() - started < 1000U) {
+        while (used < sizeof(bytes) && millis() - started < 2500U) {
             const int byteRead = client.read();
             if (byteRead < 0) {
                 if (!client.connected()) return;
@@ -136,7 +136,26 @@ private:
             }
         }
 
-        if (!complete || HWC::Http::parseRequest(bytes, used, request) != HWC::Http::PARSE_OK) {
+        if (!complete) {
+            if (used == sizeof(bytes)) {
+                sendEthernetStatus(client, "431 Request Header Fields Too Large",
+                                   "HTTP hlavičky jsou příliš dlouhé.\n");
+            } else if (used != 0) {
+                sendEthernetStatus(client, "408 Request Timeout", "HTTP požadavek nebyl doručen celý.\n");
+            }
+            return;
+        }
+        const HWC::Http::ParseResult parsed = HWC::Http::parseRequest(bytes, used, request);
+        if (parsed == HWC::Http::PARSE_TOO_LARGE) {
+            sendEthernetStatus(client, "431 Request Header Fields Too Large",
+                               "HTTP požadavek překračuje povolenou velikost.\n");
+            return;
+        }
+        if (parsed == HWC::Http::PARSE_UNSUPPORTED_METHOD) {
+            sendEthernetStatus(client, "405 Method Not Allowed", "Dostupné je pouze čtení.\n", "Allow: GET\r\n");
+            return;
+        }
+        if (parsed != HWC::Http::PARSE_OK) {
             sendEthernetStatus(client, "400 Bad Request", "Neplatný požadavek.\n");
             return;
         }

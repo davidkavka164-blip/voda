@@ -13,10 +13,10 @@ namespace Http {
 static const size_t MAX_REQUEST_LINE = 191;
 static const size_t MAX_PATH = 127;
 static const size_t MAX_QUERY = 255;
-static const size_t MAX_HEADER_BYTES = 1024;
-static const size_t MAX_HEADERS = 16;
+static const size_t MAX_HEADER_BYTES = 4096;
+static const size_t MAX_HEADERS = 24;
 static const size_t MAX_HEADER_NAME = 31;
-static const size_t MAX_HEADER_VALUE = 127;
+static const size_t MAX_HEADER_VALUE = 511;
 static const size_t MAX_BODY = 1024;
 static const size_t MAX_PARAMS = 24;
 static const size_t MAX_PARAM_NAME = 31;
