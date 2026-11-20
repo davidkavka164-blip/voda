@@ -31,9 +31,9 @@
 #include "src/NvsWellCalibrationStore.h"
 #include "src/NvsDailyInflowStore.h"
 #include "src/InflowPersistencePolicy.h"
-#include <SPI.h>
-#include <Ethernet.h>
-#include "src/EthernetStatus.h"
+#include <ETH.h>
+#include <atomic>
+#include <Network.h>
 #include <WiFi.h>
 #include <WebServer.h>
 #include <Update.h>
@@ -146,39 +146,23 @@ bool webStarted = false;
 bool apMode = false;
 bool apCredentialStorageReady = false;
 bool initialConfigApPasswordGenerated = false;
-bool wifiConfigured = false;
 String apName;
 String apPassword;
 String adminPassword;
 String savedWifiSsid;
 String savedWifiPassword;
-uint32_t lastReconnectAttemptMs = 0;
-uint32_t disconnectedSinceMs = 0;
-struct EthernetWaterStatus {
-    uint32_t wellReadAt;
-    uint32_t lowerReadAt;
-    bool wellValid;
-    bool lowerValid;
-    float wellCm;
-    float lowerCm;
-};
-
-void renderEthernetStatus(const EthernetWaterStatus& water, uint32_t now, char* body, size_t capacity);
-void renderEthernetStatus(const EthernetWaterStatus& water, uint32_t now, char* body, size_t capacity) {
-    char well[48] = "nedostupné";
-    char lower[48] = "nedostupné";
-    if (HWC::sampleIsFresh(water.wellValid, now, water.wellReadAt, 5000U)) {
-        snprintf(well, sizeof(well), "%.1f cm", water.wellCm);
-    }
-    if (HWC::sampleIsFresh(water.lowerValid, now, water.lowerReadAt, 5000U)) {
-        snprintf(lower, sizeof(lower), "%.1f cm", water.lowerCm);
-    }
-    snprintf(body, capacity, "HOME WATER CONTROLLER — ESP32 #1\nStudna: %s\nDolní nádrž: %s\n", well, lower);
-}
-
-HWC::EthernetStatus<EthernetWaterStatus> ethernetStatus(
-    HwcPins::Esp32_1::W5500_CS, HwcPins::Esp32_1::W5500_RST, HwcPins::Esp32_1::W5500_SCK,
-    HwcPins::Esp32_1::W5500_MISO, HwcPins::Esp32_1::W5500_MOSI, renderEthernetStatus);
+uint32_t lastWifiAttemptMs = 0;
+bool wifiReconnectRequested = false;
+bool wifiAttemptPending = false;
+bool wifiStaDisabled = false;
+uint32_t lastManagementLinkMs = 0;
+uint32_t lastServiceApAttemptMs = 0;
+bool serviceApActive = false;
+constexpr uint32_t MANAGEMENT_LINK_GRACE_MS = 30000U;
+constexpr uint32_t WIFI_RETRY_INTERVAL_MS = 30000U;
+enum class EthernetStartup { Pending, Ready, Failed };
+std::atomic<EthernetStartup> ethernetStartup{EthernetStartup::Pending};
+IPAddress reportedEthernetIp;
 HWC::InflowPersistencePolicy inflowPersistence = HWC::defaultInflowPersistencePolicy();
 bool inflowStorageWritable = false;
 bool timeSyncConfigured = false;
@@ -220,7 +204,10 @@ uint32_t currentLocalDateKey(bool& valid) {
 }
 
 void configureTimeSyncIfNeeded() {
-    if (timeSyncConfigured || WiFi.status() != WL_CONNECTED) return;
+    if (timeSyncConfigured) return;
+    const bool wifiReady = WiFi.STA.connected() && WiFi.STA.hasIP();
+    const bool ethernetReady = ethernetStartup.load() == EthernetStartup::Ready && ETH.linkUp() && ETH.hasIP();
+    if (!wifiReady && !ethernetReady) return;
     setenv("TZ", "CET-1CEST,M3.5.0/2,M10.5.0/3", 1);
     tzset();
     configTime(0, 0, "pool.ntp.org");
@@ -876,20 +863,21 @@ void updateTransferControl(uint32_t nowMs) {
 void handleRoot() {
     if (!requireWebAuth()) return;
     String h = pageStart("ESP32 #1 – studna");
-    h += "<section><h3>Stav</h3><p>Síť: ";
-    if (WiFi.status() == WL_CONNECTED) h += apMode ? "Wi-Fi klient + konfigurační AP" : "Wi-Fi klient";
-    else h += apMode ? "konfigurační AP; Wi-Fi se zkouší obnovit" : "Wi-Fi odpojena";
-    h += "</p>";
-    if (WiFi.status() == WL_CONNECTED) { h += "<p>Adresa Wi-Fi: "; h += WiFi.localIP().toString(); h += "</p>"; }
-    if (apMode) { h += "<p>Adresa AP: "; h += WiFi.softAPIP().toString(); h += "<br>AP: <b>" + htmlEscape(apName) + "</b></p>"; }
-    h += "<p>Ethernet W5500: ";
-    const HWC::EthernetLinkView link = ethernetStatus.linkView();
-    h += link.ready ? "DHCP připojeno" : (link.linkDown ? "odpojeno" : "bez DHCP adresy / probíhá obnova");
-    if (link.ready) {
-        h += "; IP adresa: ";
-        h += IPAddress(link.octets).toString();
+    h += "<section><h3>Stav</h3><p>Ethernet W5500: ";
+    const EthernetStartup startup = ethernetStartup.load();
+    if (startup == EthernetStartup::Ready && ETH.linkUp() && ETH.hasIP()) {
+        h += "DHCP adresa přidělena</p><p>IP adresa: <b>" + ETH.localIP().toString() + "</b></p>";
+    } else {
+        if (startup == EthernetStartup::Pending) h += "Probíhá inicializace W5500";
+        else if (startup == EthernetStartup::Failed) h += "Inicializace W5500 selhala";
+        else h += ETH.linkUp() ? "Čeká se na DHCP" : "Fyzický link je odpojen";
+        h += "</p>";
     }
-    h += "</p><p class=\"muted\">Ovládací web ESP32 #1 je v této revizi dostupný přes Wi-Fi nebo konfigurační AP; W5500 poskytuje stav hladin na /status po přihlášení.</p>";
+    h += "<p>Ovládací web je dostupný přes Ethernet i Wi-Fi. REV103 Core 3 – stolní zkouška.</p>";
+    h += apMode ? "<p>Servisní AP je zapnutý.</p>" : "<p>Servisní AP je vypnutý.</p>";
+    if (apMode) {
+        h += "<p>Adresa AP: " + WiFi.softAPIP().toString() + "<br>AP: <b>" + htmlEscape(apName) + "</b></p>";
+    }
     h += "<p>Průměr studny: "; h += String(wellGeometry.internalDiameterCm,1);
     h += " cm; využitelná hloubka: "; h += String(wellGeometry.usableDepthCm,1); h += " cm</p><p>Kalibračních bodů: ";
     h += String(wellCalibration.pointCount); h += "</p><p class='warn'>Ruční i automatický transfer ovládá ventily přes relé GPIO 16/17. Čerpadla běžně spouští a vypíná vlastní tlaková automatika; ESP32 přes samostatná bezpečnostní relé povoluje nebo přerušuje napájení čerpadel (studna GPIO 25, dolní nádrž GPIO 32).</p></section>";
@@ -1096,7 +1084,24 @@ void handleRoot() {
         h += "<h4>Servisní obnova snímače dolní nádrže</h4><p class='warn'>Použijte pouze po nezávislém fyzickém změření skutečné hladiny. Zadejte ověřené měřítko; posun se vypočítá z aktuálního surového měření a referenční hladiny.</p><form method='post' action='/sensor-recovery'><input type='hidden' name='sensor' value='lower'><label>Ověřené měřítko (0,5–1,5)</label><input name='scale' type='number' min='0.5' max='1.5' step='0.001' required><label>Skutečná hladina změřená nezávislou metodou (cm)</label><input name='reference' type='number' min='0' max='2000' step='0.1' required><label><input style='width:auto' type='checkbox' name='physical' value='yes' required> Potvrzuji fyzické změření hladiny nezávislou referencí a správné přiřazení snímače.</label><button type='submit'>Obnovit elektrické nastavení dolní nádrže</button></form>";
     }
     h += "</section>";
-    h += "<section><h3>Wi-Fi</h3><form method='post' action='/wifi'><label>Název domácí Wi-Fi (SSID)</label><input name='ssid' maxlength='32' required><label>Heslo Wi-Fi</label><input name='password' type='password' maxlength='64'><button type='submit'>Uložit Wi-Fi a restartovat</button></form><small>Údaje se ukládají lokálně do NVS. Pokud se zařízení nepřipojí, spustí vlastní konfigurační AP.</small></section>";
+    h += "<section><h3>Domácí Wi-Fi</h3><p>";
+    if (wifiStaDisabled) {
+        h += (WiFi.getMode() & WIFI_MODE_STA) ? "Vypíná se." : "Vypnuto.";
+    } else if (WiFi.STA.connected() && WiFi.STA.hasIP()) {
+        h += "Připojeno, IP adresa: " + WiFi.localIP().toString();
+    } else {
+        h += savedWifiSsid.length() ? "Připojení se obnovuje." : "Připojení není nastavené.";
+    }
+    h += "</p><form method='post' action='/wifi-mode'>";
+    if (wifiStaDisabled) {
+        h += "<button name='mode' value='on' type='submit'>Zapnout domácí Wi-Fi</button>";
+    } else {
+        h += "<button name='mode' value='off' type='submit'>Vypnout domácí Wi-Fi</button>";
+    }
+    h += "</form><form method='post' action='/wifi'><label>Název domácí Wi-Fi (SSID)</label>"
+         "<input name='ssid' maxlength='32' required><label>Heslo Wi-Fi</label>"
+         "<input name='password' type='password' maxlength='64'>"
+         "<button type='submit'>Uložit nastavení Wi-Fi</button></form></section>";
     h += "<section><h3>Systém – aktualizace firmwaru</h3><p class='warn'>Před aktualizací ověřte, že čerpadla právě nečerpají a ventily jsou zavřené. Při restartu ESP32 se bezpečnostní relé krátce odpojí a čerpadlo se zastaví.</p><p>Nahrajte soubor firmwaru <code>.bin</code> určený pro ESP32 #1. Během aktualizace nevypínejte napájení. Nastavení a kalibrace v NVS zůstávají odděleně.</p><form method='post' action='/update' enctype='multipart/form-data'><input type='file' name='firmware' accept='.bin,application/octet-stream' required><button type='submit'>Aktualizovat ESP32 #1</button></form><small>ESP32 #2 má vlastní lokální aktualizační stránku. Pro každou jednotku použijte pouze její odpovídající firmware a funkční OTA partition.</small></section>";
     h += "</body></html>";
     webServer.send(200, "text/html; charset=utf-8", h);
@@ -1380,8 +1385,8 @@ void handleUpdateUpload() {
 void handleUpdateComplete() {
     if (!requireWebAuth()) return;
     if (otaSucceeded) {
-        webServer.send(200, "text/html; charset=utf-8",
-                       "<!doctype html><html lang='cs'><meta charset='utf-8'><body><h2>Aktualizace ESP32 #1 byla dokončena.</h2><p>Zařízení se restartuje.</p></body></html>");
+        sendResult("Aktualizace ESP32 #1 byla dokončena. Zařízení se restartuje. "
+                   "Za několik sekund klikněte na Zpět na hlavní stránku.", true);
         delay(1000);
         ESP.restart();
         return;
@@ -1576,24 +1581,87 @@ void updateWellPumpProtection(const HWC::LevelSensorReading& reading) {
     }
 }
 
+void loadWifi() {
+    Preferences settings;
+    if (settings.begin("hwc_wifi", true)) {
+        wifiStaDisabled = settings.getBool("sta_off", false);
+        settings.end();
+    }
+    HWC::NvsCredentialBackend backend("hwc_wifi");
+    if (!backend.begin()) return;
+    HWC::WifiStaCredentialStore store(backend);
+    HWC::WifiStaCredentials stored = {};
+    if (store.load(stored) == HWC::WIFI_STA_CREDENTIAL_VALID) {
+        savedWifiSsid = stored.ssid;
+        savedWifiPassword = stored.password;
+        wifiReconnectRequested = true;
+    }
+    HWC::WifiStaCredentialStore::clear(stored);
+    backend.end();
+}
+
 void handleWifi() {
     if (!requireWebAuth()) return;
-    if (!webServer.hasArg("ssid")) { sendResult("Chybí název Wi-Fi.", false); return; }
-    String ssid = webServer.arg("ssid"); String password = webServer.arg("password");
+    String ssid = webServer.arg("ssid");
+    const String password = webServer.arg("password");
     ssid.trim();
-    if (ssid.length() == 0 || ssid.length() > 32 || password.length() > 64) { sendResult("Neplatný název Wi-Fi (max. 32 znaků) nebo heslo (max. 64 znaků).", false); return; }
-    HWC::NvsCredentialBackend wifiBackend("hwc_wifi");
-    if (!wifiBackend.begin()) { sendResult("NVS pro Wi-Fi není dostupné.", false); return; }
-    HWC::WifiStaCredentialStore wifiStore(wifiBackend);
+    if (ssid.length() == 0 || ssid.length() > 32 || password.length() > 64 ||
+        (password.length() != 0 && password.length() < 8)) {
+        webServer.send(400, "text/plain; charset=utf-8", "Neplatný název nebo heslo Wi-Fi.");
+        return;
+    }
+
+    HWC::NvsCredentialBackend backend("hwc_wifi");
+    if (!backend.begin()) {
+        webServer.send(503, "text/plain; charset=utf-8", "Úložiště Wi-Fi není dostupné.");
+        return;
+    }
+    HWC::WifiStaCredentialStore store(backend);
     HWC::WifiStaCredentials candidate = {};
     ssid.toCharArray(candidate.ssid, sizeof(candidate.ssid));
     password.toCharArray(candidate.password, sizeof(candidate.password));
-    const bool saved = wifiStore.save(candidate);
+    const bool saved = store.save(candidate);
     HWC::WifiStaCredentialStore::clear(candidate);
-    wifiBackend.end();
-    if (!saved) { sendResult("Uložení Wi-Fi údajů nebylo možné bezpečně potvrdit. Zařízení se nerestartuje.", false); return; }
-    sendResult("Wi-Fi údaje byly uloženy. Zařízení se nyní restartuje.", true);
-    delay(900); ESP.restart();
+    backend.end();
+    if (!saved) {
+        webServer.send(500, "text/plain; charset=utf-8", "Uložení Wi-Fi údajů nebylo potvrzené.");
+        return;
+    }
+    savedWifiSsid = ssid;
+    savedWifiPassword = password;
+    wifiReconnectRequested = true;
+    sendResult(wifiStaDisabled
+        ? "Wi-Fi údaje byly uloženy. Domácí Wi-Fi je vypnutá. Zapneš ji na přehledu."
+        : "Wi-Fi údaje byly uloženy. Jednotka zkusí nové připojení. Přes kabel můžeš výsledek zkontrolovat na přehledu.", true);
+}
+
+void handleWifiMode() {
+    if (!requireWebAuth()) return;
+    const String mode = webServer.arg("mode");
+    if (mode != "on" && mode != "off") {
+        webServer.send(400, "text/plain; charset=utf-8", "Neplatný režim domácí Wi-Fi.");
+        return;
+    }
+
+    const bool disable = mode == "off";
+    Preferences settings;
+    if (!settings.begin("hwc_wifi", false)) {
+        webServer.send(503, "text/plain; charset=utf-8", "Úložiště Wi-Fi není dostupné.");
+        return;
+    }
+    settings.putBool("sta_off", disable);
+    const bool saved = settings.isKey("sta_off") && settings.getBool("sta_off", !disable) == disable;
+    settings.end();
+    if (!saved) {
+        webServer.send(500, "text/plain; charset=utf-8", "Uložení režimu Wi-Fi nebylo potvrzené.");
+        return;
+    }
+    wifiStaDisabled = disable;
+    wifiAttemptPending = false;
+    wifiReconnectRequested = true;
+    sendResult(disable
+        ? "Domácí Wi-Fi se vypne. Údaje sítě zůstávají uložené."
+        : "Domácí Wi-Fi je povolená. Pokud jsou uložené údaje, zařízení se zkusí připojit.", true);
 }
 
 bool prepareConfigApCredentials() {
@@ -1643,58 +1711,130 @@ bool prepareConfigApCredentials() {
     return apCredentialStorageReady;
 }
 
-bool startConfigAp(bool keepStation) {
-    if (apMode) return true;
+void maintainWifi(uint32_t now) {
+    if (!webStarted) return;
+    if (wifiStaDisabled) {
+        wifiAttemptPending = false;
+        if ((WiFi.getMode() & WIFI_MODE_STA) &&
+            (wifiReconnectRequested || now - lastWifiAttemptMs >= WIFI_RETRY_INTERVAL_MS)) {
+            lastWifiAttemptMs = now;
+            if (!WiFi.enableSTA(false)) Serial.println("ESP32 #1 Wi-Fi STA could not be disabled; will retry.");
+        }
+        wifiReconnectRequested = false;
+        return;
+    }
+    if (savedWifiSsid.length() == 0) return;
+
+    if (wifiReconnectRequested || (!wifiAttemptPending &&
+        !(WiFi.STA.connected() && WiFi.STA.hasIP()) &&
+        now - lastWifiAttemptMs >= WIFI_RETRY_INTERVAL_MS)) {
+        wifiReconnectRequested = false;
+        lastWifiAttemptMs = now;
+        wifiAttemptPending = WiFi.enableSTA(true);
+        if (wifiAttemptPending) {
+            WiFi.disconnectAsync(false, false);
+        } else {
+            Serial.println("ESP32 #1 Wi-Fi STA initialization failed; will retry.");
+        }
+        return;
+    }
+
+    if (!wifiAttemptPending || now - lastWifiAttemptMs < 250U) return;
+    if (!WiFi.STA.started() || WiFi.STA.connected()) {
+        if (now - lastWifiAttemptMs >= 2000U) {
+            wifiAttemptPending = false;
+            wifiReconnectRequested = true;
+            Serial.println("ESP32 #1 Wi-Fi STA not ready for new credentials; will retry.");
+        }
+        return;
+    }
+
+    wifiAttemptPending = false;
+    lastWifiAttemptMs = now;
+    if (!WiFi.STA.connect(savedWifiSsid.c_str(), savedWifiPassword.c_str())) {
+        Serial.println("ESP32 #1 Wi-Fi connection could not start; will retry.");
+    }
+}
+
+void maintainServiceAp(uint32_t now) {
+    if (!webStarted) return;
+    const bool wifiReady = WiFi.STA.connected() && WiFi.STA.hasIP();
+    const bool ethernetReady = ethernetStartup.load() == EthernetStartup::Ready && ETH.linkUp() && ETH.hasIP();
+    if (wifiReady || ethernetReady) {
+        lastManagementLinkMs = now;
+        if (apMode && WiFi.enableAP(false)) {
+            apMode = false;
+            Serial.println("ESP32 #1 service AP stopped: management link restored.");
+        }
+        return;
+    }
+
+    if (apMode || now - lastManagementLinkMs < MANAGEMENT_LINK_GRACE_MS ||
+        now - lastServiceApAttemptMs < 5000U) return;
+    lastServiceApAttemptMs = now;
     if (!apCredentialStorageReady || apPassword.length() < 8 || apPassword.length() > 63 ||
         adminPassword.length() < 12 || adminPassword.length() > 64) {
         Serial.println("ERROR: configuration AP start blocked; credentials are not verified in NVS.");
-        return false;
-    }
-    WiFi.mode(keepStation ? WIFI_AP_STA : WIFI_AP);
-    if (!WiFi.softAP(apName.c_str(), apPassword.c_str())) {
-        Serial.println("ERROR: could not start configuration AP.");
-        return false;
-    }
-    apMode = true;
-    Serial.printf("Configuration AP started: SSID=%s; web UI: http://%s/\n",
-                  apName.c_str(), WiFi.softAPIP().toString().c_str());
-    return true;
-}
-
-void maintainNetwork() {
-    if (!wifiConfigured) return;
-    const uint32_t now = millis();
-    if (WiFi.status() == WL_CONNECTED) {
-        disconnectedSinceMs = 0;
-        configureTimeSyncIfNeeded();
         return;
     }
-    if (disconnectedSinceMs == 0) disconnectedSinceMs = now ? now : 1;
 
-    // Retry the saved station connection periodically. If the connection was lost
-    // after startup, preserve local access by starting AP after a grace period.
-    if (lastReconnectAttemptMs == 0 || static_cast<uint32_t>(now - lastReconnectAttemptMs) >= 15000U) {
-        lastReconnectAttemptMs = now ? now : 1;
-        Serial.println("Wi-Fi disconnected; retrying saved network credentials.");
-        WiFi.mode(apMode ? WIFI_AP_STA : WIFI_STA);
-        WiFi.begin(savedWifiSsid.c_str(), savedWifiPassword.c_str());
-    }
-    if (!apMode && static_cast<uint32_t>(now - disconnectedSinceMs) >= 30000U) {
-        Serial.println("Wi-Fi has been unavailable for 30 seconds; enabling fallback AP while retries continue.");
-        startConfigAp(true);
+    apMode = WiFi.softAP(apName.c_str(), apPassword.c_str());
+    if (apMode) {
+        Serial.printf("ESP32 #1 local AP started: SSID=%s IP=%s\n",
+                      apName.c_str(), WiFi.softAPIP().toString().c_str());
+    } else {
+        WiFi.enableAP(false);
+        Serial.println("ESP32 #1 service AP could not start; will retry.");
     }
 }
 
-void publishEthernetWaterStatus() {
-    const EthernetWaterStatus water = {
-        lastWellReadingMs, lastLowerTankReadingMs,
-        haveWellReading && lastWellReading.result.status == HWC::SENSOR_MATH_OK &&
-            HWC::sensorConfigUsableForLevelMeasurement(wellSensorConfigState),
-        haveLowerTankReading && lastLowerTankReading.result.status == HWC::SENSOR_MATH_OK &&
-            HWC::sensorConfigUsableForLevelMeasurement(lowerSensorConfigState),
-        lastWellReading.result.calibratedLevelCm, lastLowerTankReading.result.calibratedLevelCm
-    };
-    ethernetStatus.publish(water);
+void initializeEthernet(void*) {
+    // The reset and driver startup may wait for hardware. Keep them off the control loop.
+    delay(500);
+    for (unsigned attempt = 1; attempt <= 3; ++attempt) {
+        Serial.printf("W5500 initialization attempt %u/3.\n", attempt);
+        pinMode(HwcPins::Esp32_1::W5500_RST, OUTPUT);
+        digitalWrite(HwcPins::Esp32_1::W5500_RST, LOW);
+        delay(50);
+        digitalWrite(HwcPins::Esp32_1::W5500_RST, HIGH);
+        delay(200);
+
+        // Firmware controls reset above. INT is unwired; core 3.3.7 polls RX.
+        if (ETH.begin(ETH_PHY_W5500, 1, HwcPins::Esp32_1::W5500_CS, -1, -1,
+                      SPI3_HOST, HwcPins::Esp32_1::W5500_SCK, HwcPins::Esp32_1::W5500_MISO,
+                      HwcPins::Esp32_1::W5500_MOSI, 10) && ETH.netif() != nullptr) {
+            ethernetStartup.store(EthernetStartup::Ready);
+            Serial.println("W5500 driver initialized.");
+            vTaskDelete(nullptr);
+            return;
+        }
+
+        Serial.println("W5500 driver initialization failed.");
+        if (attempt < 3) {
+            ETH.end();
+            if (ETH.netif() != nullptr) break;
+            delay(2500);
+        }
+    }
+    ethernetStartup.store(EthernetStartup::Failed);
+    vTaskDelete(nullptr);
+}
+
+void startEthernet() {
+    if (xTaskCreatePinnedToCore(initializeEthernet, "hwc-eth-init", 5120, nullptr, 1, nullptr, 0) != pdPASS) {
+        ethernetStartup.store(EthernetStartup::Failed);
+        Serial.println("W5500 initialization task could not start.");
+    }
+}
+
+void reportEthernetAddress() {
+    if (ethernetStartup.load() != EthernetStartup::Ready) return;
+    const IPAddress ip = ETH.linkUp() && ETH.hasIP() ? ETH.localIP() : IPAddress();
+    if (ip == reportedEthernetIp) return;
+    reportedEthernetIp = ip;
+    if (ip != IPAddress()) {
+        Serial.printf("Ethernet management: http://%s/\n", ip.toString().c_str());
+    }
 }
 
 bool prepareLegacyAdminCredential(bool& generatedNew) {
@@ -1830,61 +1970,23 @@ bool loadUnifiedCredentials() {
 }
 
 void startWebAndNetwork() {
-    const bool credentialsReady = loadUnifiedCredentials();
-    if (!credentialsReady) {
+    if (!Network.begin()) {
+        Serial.println("Network initialization failed; local sensing and protection remain active.");
+        return;
+    }
+    startEthernet();
+    if (!loadUnifiedCredentials()) {
         Serial.println("Web/AP credential startup gate: CLOSED.");
+        return;
     }
-
-    savedWifiSsid = "";
-    savedWifiPassword = "";
-    wifiConfigured = false;
-    HWC::NvsCredentialBackend wifiBackend("hwc_wifi");
-    if (wifiBackend.begin()) {
-        HWC::WifiStaCredentialStore wifiStore(wifiBackend);
-        HWC::WifiStaCredentials stored = {};
-        const HWC::WifiStaCredentialStatus wifiStatus = wifiStore.load(stored);
-        if (wifiStatus == HWC::WIFI_STA_CREDENTIAL_VALID) {
-            savedWifiSsid = String(stored.ssid);
-            savedWifiPassword = String(stored.password);
-            wifiConfigured = savedWifiSsid.length() > 0;
-        } else if (wifiStatus == HWC::WIFI_STA_CREDENTIAL_CORRUPT ||
-                   wifiStatus == HWC::WIFI_STA_CREDENTIAL_IO_ERROR) {
-            Serial.printf("Home Wi-Fi credentials unavailable/corrupt (state=%u); using configuration AP.\n",
-                          static_cast<unsigned>(wifiStatus));
-        }
-        HWC::WifiStaCredentialStore::clear(stored);
-        wifiBackend.end();
-    } else {
-        Serial.println("Home Wi-Fi NVS unavailable; using configuration AP.");
-    }
-    // W5500 is an independent network interface; its failure must not gate Wi-Fi or local control.
-    ethernetStatus.begin(adminPassword);
-
+    loadWifi();
     WiFi.persistent(false);
-    WiFi.setSleep(false);
-
-    if (wifiConfigured) {
-        WiFi.mode(WIFI_STA);
-        WiFi.begin(savedWifiSsid.c_str(), savedWifiPassword.c_str());
-        const uint32_t start = millis();
-        while (WiFi.status() != WL_CONNECTED && static_cast<uint32_t>(millis() - start) < 15000U) delay(250);
-        if (WiFi.status() == WL_CONNECTED) {
-            Serial.printf("Wi-Fi connected; web UI: http://%s/\n", WiFi.localIP().toString().c_str());
-            disconnectedSinceMs = 0;
-        } else {
-            Serial.println("Saved Wi-Fi unavailable at startup; enabling AP and continuing reconnect attempts.");
-            disconnectedSinceMs = millis() ? millis() : 1;
-            lastReconnectAttemptMs = millis() ? millis() : 1;
-            startConfigAp(true);
-        }
-    } else {
-        Serial.println("No saved Wi-Fi credentials; starting configuration AP.");
-        startConfigAp(false);
-    }
+    WiFi.setAutoReconnect(false);
 
     static const char* requestHeaders[] = {"Origin", "Host"};
     webServer.collectHeaders(requestHeaders, 2);
     webServer.on("/", HTTP_GET, handleRoot);
+    webServer.on("/status", HTTP_GET, handleRoot);
     webServer.on("/geometry", HTTP_POST, handleGeometry);
     webServer.on("/calibration", HTTP_POST, handleCalibration);
     webServer.on("/sensor-calibration", HTTP_POST, handleSensorCalibration);
@@ -1900,9 +2002,12 @@ void startWebAndNetwork() {
     webServer.on("/manual-valve-mode", HTTP_POST, handleManualValveMode);
     webServer.on("/manual-valve-command", HTTP_POST, handleManualValveCommand);
     webServer.on("/wifi", HTTP_POST, handleWifi);
+    webServer.on("/wifi-mode", HTTP_POST, handleWifiMode);
     webServer.on("/update", HTTP_POST, handleUpdateComplete, handleUpdateUpload);
     webServer.onNotFound([](){ if (!requireWebAuth()) return; webServer.send(404, "text/plain; charset=utf-8", "Not found"); });
     webServer.begin();
+    lastManagementLinkMs = millis();
+    lastServiceApAttemptMs = lastManagementLinkMs;
     webStarted = true;
 }
 
@@ -1935,7 +2040,7 @@ void setup() {
         writeValveRelayLevel);
     delay(250);
     Serial.println();
-    Serial.println("HOME WATER CONTROLLER - ESP32 #1");
+    Serial.println("HOME WATER CONTROLLER - ESP32 #1 / REV103 CORE 3 BENCH");
     Serial.println("DEVELOPMENT BUILD - VALVE RELAYS AND PUMP SAFETY OUTPUTS ENABLED");
     // Relay pins were initialized OFF before the startup delay above.
     Serial.printf("Valve relay driver: %s; well GPIO=%u, upper GPIO=%u, active-high; relay board supply 5V\n",
@@ -2131,8 +2236,11 @@ void setup() {
 
 void loop() {
     if (webStarted) webServer.handleClient();
-    maintainNetwork();
     const uint32_t now = millis();
+    maintainWifi(now);
+    maintainServiceAp(now);
+    reportEthernetAddress();
+    configureTimeSyncIfNeeded();
     // The two controllers are independent; peer telemetry is not polled.
     if (static_cast<uint32_t>(now - lastReportMs) >= 2000U) {
         lastReportMs = now;
@@ -2173,6 +2281,5 @@ void loop() {
     updateManualValveSafety(millis());
     syncManualValveRelayOutput();
     syncPumpSafetyRelayOutputs(millis());
-    publishEthernetWaterStatus();
     delay(10);
 }

@@ -5,7 +5,7 @@ cd "$ROOT"
 INO=firmware/ESP32_1/ESP32_1.ino
 STORE=firmware/common/WifiStaCredentialStore.h
 grep -q '#include "src/WifiStaCredentialStore.h"' "$INO"
-grep -q 'WifiStaCredentialStore wifiStore(wifiBackend)' "$INO"
+grep -q 'WifiStaCredentialStore store(backend)' "$INO"
 if grep -q 'putString("ssid"\|putString("password"\|getString("ssid"\|getString("password"' "$INO"; then
   echo "FAIL: legacy split Wi-Fi access remains in production sketch" >&2
   exit 1

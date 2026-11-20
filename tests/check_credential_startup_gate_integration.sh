@@ -14,9 +14,9 @@ grep -q 'CredentialLegacyMigrator::loadOrMigrate' "$ESP2"
 [ "$(grep -c 'ensureCredentialText(' "$ESP2")" -ge 3 ]
 
 # ESP32 #1 must block AP start until AP and administrator credentials are valid.
-awk '/bool startConfigAp\(bool keepStation\)/,/^}/ { print }' "$ESP1" | grep -q 'if (!apCredentialStorageReady'
-awk '/bool startConfigAp\(bool keepStation\)/,/^}/ { print }' "$ESP1" | grep -q 'adminPassword.length() < 12'
-awk '/bool startConfigAp\(bool keepStation\)/,/^}/ { print }' "$ESP1" | grep -q 'WiFi.softAP'
+awk '/void maintainServiceAp\(uint32_t now\)/,/^}/ { print }' "$ESP1" | grep -q 'if (!apCredentialStorageReady'
+awk '/void maintainServiceAp\(uint32_t now\)/,/^}/ { print }' "$ESP1" | grep -q 'adminPassword.length() < 12'
+awk '/void maintainServiceAp\(uint32_t now\)/,/^}/ { print }' "$ESP1" | grep -q 'WiFi.softAP'
 
 # ESP32 #2 must not call softAP before all three credentials pass the startup gate.
 awk '/void startLocalWeb\(\)/,/^}/ { print }' "$ESP2" | grep -q 'if (!credentialsReady)'

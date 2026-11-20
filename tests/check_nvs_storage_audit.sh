@@ -35,7 +35,7 @@ LIMITS="$ROOT/firmware/common/NvsUpperTankLimitsStore.cpp"
 for key in '"slot0"' '"slot1"' '"head"' '"txn"'; do grep -Fq "$key" "$LIMITS"; done
 
 # REV84: home Wi-Fi STA credentials use a two-slot commit marker and exact read-back.
-grep -Fq 'WifiStaCredentialStore wifiStore(wifiBackend)' "$ESP1"
+grep -Fq 'WifiStaCredentialStore store(backend)' "$ESP1"
 grep -Fq '"sta_active"' "$ROOT/firmware/common/WifiStaCredentialStore.h"
 grep -Fq 'backend_.get("sta_active", verify' "$ROOT/firmware/common/WifiStaCredentialStore.h"
 
