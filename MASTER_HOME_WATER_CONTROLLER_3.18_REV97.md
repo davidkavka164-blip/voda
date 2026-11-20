@@ -41,6 +41,16 @@ a ověřená REV102 pro ESP32 #2. REV103 přenáší síťové funkce ESP32 #2
 na ESP32 #1 a čeká na její samostatnou stolní zkoušku. Srovnávací použití
 přiloženého projektu čidla a relé je popsané v [postupu REV103](https://github.com/davidkavka164-blip/voda/blob/3cf829d09baca359cdc46344a3c64fe256d27702/docs/REV103_BASE_AND_OTA.md).
 
+## Web samostatných jednotek v REV104
+
+Na zkušební větvi REV104 popisuje ESP32 #1 místní řízení přepouštění a
+kontrolu přítoku do dolní nádrže. ESP32 #2 zobrazuje teplotu a hladinu pro
+ochranu horního čerpadla, se třemi místními mezemi ochrany. Z webu jsou
+vyřazeny historické funkce zásoby pro domácnost a objemové kalibrace
+horní nádrže. Uložené objemové údaje se nemažou. Oba OTA obrazy jsou
+popsané v [REV104](https://github.com/davidkavka164-blip/voda/blob/d01f805a6c1a6da4e4b8c6d3d89a1ae41e247120/docs/REV104_LOCAL_WEB.md).
+REV97 dál slouží pro první nahrání s core 1.0.6.
+
 ## Další stolní zkouška v REV97
 
 U ESP32 #2 s odpojenými výstupy čerpadla nejprve nahraj odpovídající sketch přes USB, pokud na desce ještě není její firmware. Ověř servisní AP a přihlášení, ulož údaje domácí Wi-Fi a ověř ovládací web přes domácí IP i servisní AP. U již ověřeného W5500 zbývá potvrdit obnovu spojení. Otevři `/status`, odpoj a připoj síťový kabel a obnov stránku bez restartu. Přehled má zobrazit horní hladinu a teplotu nebo příslušnou informaci o nedostupnosti. K případné zkoušce OTA použij aplikační soubor výhradně pro danou jednotku.
