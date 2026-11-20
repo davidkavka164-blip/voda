@@ -19,13 +19,14 @@ Tento dokument aktualizuje stav sítě a ověření [masteru 3.17 / REV94](MASTE
 | ESP32 #1 – servisní AP a ovládací web z domácí Wi-Fi | Uživatel ověřil přístup na desce. |
 | ESP32 #1 – Ethernet v REV97 | Uživatel ověřil přihlášený `/status` i obnovení stránky po vytažení a zapojení kabelu bez restartu. |
 | ESP32 #1 – aktualizace OTA | Uživatel potvrdil úspěšné nahrání REV97 přes OTA a po aktualizaci ověřil ethernetový přehled. |
-| ESP32 #2 – AP, Wi-Fi STA, W5500, OTA | Sestavení prošlo. Souběh AP a STA, přihlášení přes W5500, návrat spojení a OTA ještě neprošly potvrzenou zkouškou na desce. |
+| ESP32 #2 – Ethernet | Uživatel potvrdil úspěšnou stolní zkoušku W5500. Návrat spojení po odpojení kabelu nebyl výslovně potvrzen. |
+| ESP32 #2 – Wi-Fi a OTA | Přístup přes servisní AP byl při dosavadní stolní zkoušce funkční. Přístup přes domácí Wi-Fi, souběh se servisním AP a OTA čekají na samostatné potvrzení. |
 | Software REV97 | Oba sketchy přeloženy s core 1.0.6. Prošlo 81 nativních testovacích programů, statické kontroly a 17 testů v Pythonu. |
 | Čidla, relé, ventily a čerpadla | Provozní ověření zůstává otevřené. Úspěšná síťová zkouška nepotvrzuje elektrické zapojení ani funkci ochran na konkrétní instalaci. |
 
 ## Další stolní zkouška
 
-U ESP32 #2 s odpojenými výstupy čerpadla nejprve nahraj odpovídající sketch přes USB, pokud na desce ještě není její firmware. Ověř servisní AP a přihlášení, ulož údaje domácí Wi-Fi a ověř ovládací web přes domácí IP i servisní AP. Potom připoj W5500, otevři `/status` na jeho IP a zkus odpojit a vrátit síťový kabel bez restartu. Přehled má zobrazit horní hladinu a teplotu nebo příslušnou informaci o nedostupnosti. K případné zkoušce OTA použij aplikační soubor výhradně pro danou jednotku.
+U ESP32 #2 s odpojenými výstupy čerpadla nejprve nahraj odpovídající sketch přes USB, pokud na desce ještě není její firmware. Ověř servisní AP a přihlášení, ulož údaje domácí Wi-Fi a ověř ovládací web přes domácí IP i servisní AP. U již ověřeného W5500 zbývá potvrdit obnovu spojení. Otevři `/status`, odpoj a připoj síťový kabel a obnov stránku bez restartu. Přehled má zobrazit horní hladinu a teplotu nebo příslušnou informaci o nedostupnosti. K případné zkoušce OTA použij aplikační soubor výhradně pro danou jednotku.
 
 - [Aplikační soubor REV97 pro ESP32 #1](https://raw.githubusercontent.com/davidkavka164-blip/voda/ota-rev97/ESP32_1_REV97.bin)
 - [Aplikační soubor REV97 pro ESP32 #2](https://raw.githubusercontent.com/davidkavka164-blip/voda/ota-rev97/ESP32_2_REV97.bin)
