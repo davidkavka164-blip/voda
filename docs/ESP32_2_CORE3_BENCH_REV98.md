@@ -37,5 +37,11 @@ přes OTA není potřeba měnit Arduino IDE ani core na počítači.
    Skutečná zkouška OTA přes Ethernet vyžaduje druhé nahrání testovacího
    aplikačního souboru a kontrolu restartu.
 
-Přechod z core 1.0.6 na 3.3.7 přes OTA a chování na fyzické jednotce zatím
-nejsou potvrzené. Tato sestava je pro stolní ověření síťové vrstvy.
+## Výsledek stolní zkoušky
+
+Uživatel potvrdil, že se na ESP32 #2 s REV98 zobrazuje stejný ovládací web
+přes Wi-Fi i W5500. Způsob prvního nahrání REV98 nebyl výslovně potvrzen.
+
+Před nasazením ve sklepě zbývá na REV98 ověřit přístup přes kabel bez
+připojení ESP32 k domácí Wi-Fi, obnovu po odpojení kabelu a nahrání OTA přes
+Ethernet. Sestava zůstává určená pro stolní ověření.
