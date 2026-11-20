@@ -51,6 +51,15 @@ horní nádrže. Uložené objemové údaje se nemažou. Oba OTA obrazy jsou
 popsané v [REV104](https://github.com/davidkavka164-blip/voda/blob/d01f805a6c1a6da4e4b8c6d3d89a1ae41e247120/docs/REV104_LOCAL_WEB.md).
 REV97 dál slouží pro první nahrání s core 1.0.6.
 
+## Objem horní nádrže v REV106
+
+ESP32 #2 podle upřesněného požadavku opět nabízí místní objemovou
+kalibraci. Po prvním známém páru hladiny a absolutního objemu se další
+body získají odečtením odhadu přírůstku dolní nádrže z ESP32 #1 po
+přepouštění. Údaj se přenáší ručně. Celkový objem při aktuální hladině je
+vidět pod nákresem horní nádrže. Ochrana čerpadla pracuje s hladinou.
+[Postup REV106 a OTA soubor](https://github.com/davidkavka164-blip/voda/blob/0aa05d2b226d812eac80f5b903903489cc142b21/docs/REV104_LOCAL_WEB.md#rev106--kalibrace-objemu-horní-nádrže).
+
 ## Další stolní zkouška v REV97
 
 U ESP32 #2 s odpojenými výstupy čerpadla nejprve nahraj odpovídající sketch přes USB, pokud na desce ještě není její firmware. Ověř servisní AP a přihlášení, ulož údaje domácí Wi-Fi a ověř ovládací web přes domácí IP i servisní AP. U již ověřeného W5500 zbývá potvrdit obnovu spojení. Otevři `/status`, odpoj a připoj síťový kabel a obnov stránku bez restartu. Přehled má zobrazit horní hladinu a teplotu nebo příslušnou informaci o nedostupnosti. K případné zkoušce OTA použij aplikační soubor výhradně pro danou jednotku.
