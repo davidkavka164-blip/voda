@@ -2,6 +2,8 @@
 
 REV97 upravuje čtení HTTP hlaviček prohlížečů na ethernetovém přehledu obou jednotek. Aktualizace OTA se spouští z ovládacího webu přes Wi-Fi.
 
+Aktuální stav, závazné zásady a otevřené zkoušky jsou v [masteru 3.18 / REV97](MASTER_HOME_WATER_CONTROLLER_3.18_REV97.md).
+
 ## Otevření v Arduino IDE
 
 | Jednotka | Sketch | Funkce |
@@ -25,19 +27,21 @@ Ethernetová stránka používá účet `admin` dané jednotky. Ovládací formu
 
 Překlad obou sketchů pro **ESP32 Dev Module** ověřen s Arduino-ESP32 1.0.6 a výše uvedenými knihovnami.
 
-Základní Ethernet a obnova stránky po odpojení kabelu byly dříve ověřeny na jedné desce s izolovaným testovacím sketchem. Obsluhu `/status`, přihlášení, souběh Wi-Fi STA a AP na ESP32 #2 a obnovu spojení v integrovaném firmwaru je potřeba ověřit na desce s odpojenými výstupy čerpadel a ventilů.
+Na ESP32 #1 je ověřen servisní AP, ovládací web z domácí Wi-Fi a ethernetový přehled v REV97 včetně návratu po odpojení kabelu. Zkoušky na ESP32 #2 a potvrzení způsobu nahrání přes OTA jsou vedené v masteru.
 
-# HOME WATER CONTROLLER — vývojový balíček 1.00 REV90
+## Historické poznámky k dřívějším revizím
+
+### Vývojový balíček 1.00 REV90
 
 Datum: 19. 11. 2026
 
-## Aktuální stav — MASTER 3.13 / REV90
+### Stav v době MASTER 3.13 / REV90
 
 REV89 navazuje na audit REV86, TUV HTTP audit REV87 a kontrakt adaptéru REV88. Přidává samostatný pevně omezený C++11 parser běžných HTTP požadavků, který je hostitelsky testovatelný a nezávislý na síťovém klientovi.
 
 **Aktuální funkční rozsah:** W5500 poskytuje DHCP a obnovu linky; Wi-Fi STA/AP zůstává zachována; webové ovládání je dostupné pouze přes Wi-Fi/AP. Ethernetová HTTP obsluha zatím není implementována. Nový parser není zapojen do produkčních `.ino`; autentizace, POST handlery a OTA proto zůstávají beze změny.
 
-Autoritativní dokument: `MASTER_HOME_WATER_CONTROLLER_3.13_REV90.md`. Technický kontrakt: `docs/HTTP_SERVER_ADAPTER_CONTRACT_REV88.md`. Popis parseru: `docs/HTTP_REQUEST_PARSER_STAGE_REV89.md`.
+Master v době REV90: `MASTER_HOME_WATER_CONTROLLER_3.13_REV90.md`. Technický kontrakt: `docs/HTTP_SERVER_ADAPTER_CONTRACT_REV88.md`. Popis parseru: `docs/HTTP_REQUEST_PARSER_STAGE_REV89.md`.
 
 ## Ověření
 
