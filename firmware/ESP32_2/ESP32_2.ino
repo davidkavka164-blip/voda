@@ -82,6 +82,12 @@ String savedWifiSsid;
 String savedWifiPassword;
 uint32_t lastWifiAttemptMs = 0;
 bool wifiReconnectRequested = false;
+bool wifiAttemptPending = false;
+uint32_t lastManagementLinkMs = 0;
+uint32_t lastServiceApAttemptMs = 0;
+bool serviceApActive = false;
+constexpr uint32_t MANAGEMENT_LINK_GRACE_MS = 30000U;
+constexpr uint32_t WIFI_RETRY_INTERVAL_MS = 30000U;
 bool ethernetStarted = false;
 IPAddress reportedEthernetIp;
 HWC::NvsUpperTankLimitsStore upperLimitsStore("hwc_upperlimits");
@@ -433,16 +439,17 @@ void handleLocalRoot() {
     }
     h += "<p>Teplota je pouze informativní. Nemá vliv na ochranu čerpadla ani řízení ventilů.</p></section>";
     h += "<section><h3>Síťové připojení W5500</h3><p>Stav Ethernetu: ";
-    if (ethernetStarted && ETH.hasIP()) {
+    if (ethernetStarted && ETH.linkUp() && ETH.hasIP()) {
         h += "DHCP adresa přidělena</p><p>IP adresa: <b>" + ETH.localIP().toString() + "</b></p>";
     } else {
         h += !ethernetStarted ? "Inicializace W5500 selhala" :
              (ETH.linkUp() ? "Čeká se na DHCP" : "Fyzický link je odpojen");
         h += "</p>";
     }
-    h += "<p>Ovládací web je dostupný přes Ethernet i Wi-Fi. REV99 Core 3 – stolní zkouška.</p></section>";
+    h += "<p>Ovládací web je dostupný přes Ethernet i Wi-Fi. REV100 Core 3 – stolní zkouška.</p></section>";
+    h += serviceApActive ? "<p>Servisní AP je zapnutý.</p>" : "<p>Servisní AP je vypnutý.</p>";
     h += "<section><h3>Domácí Wi-Fi</h3><p>";
-    if (WiFi.status() == WL_CONNECTED) {
+    if (WiFi.STA.connected() && WiFi.STA.hasIP()) {
         h += "Připojeno, IP adresa: " + WiFi.localIP().toString();
     } else {
         h += savedWifiSsid.length() ? "Připojení se obnovuje." : "Připojení není nastavené.";
@@ -744,7 +751,8 @@ void handleLocalWifi() {
     String ssid = localWebServer.arg("ssid");
     const String password = localWebServer.arg("password");
     ssid.trim();
-    if (ssid.length() == 0 || ssid.length() > 32 || password.length() > 64) {
+    if (ssid.length() == 0 || ssid.length() > 32 || password.length() > 64 ||
+        (password.length() != 0 && password.length() < 8)) {
         localWebServer.send(400, "text/plain; charset=utf-8", "Neplatný název nebo heslo Wi-Fi.");
         return;
     }
@@ -768,7 +776,7 @@ void handleLocalWifi() {
     savedWifiSsid = ssid;
     savedWifiPassword = password;
     wifiReconnectRequested = true;
-    sendLocalResult("Wi-Fi údaje byly uloženy. Zařízení se připojí a servisní AP zůstane dostupný.");
+    sendLocalResult("Wi-Fi údaje byly uloženy. Jednotka zkusí nové připojení. Přes kabel můžeš výsledek zkontrolovat na přehledu.");
 }
 
 void startLocalWeb() {
@@ -894,13 +902,7 @@ void startLocalWeb() {
     }
 
     WiFi.persistent(false);
-    const bool apStarted = WiFi.mode(WIFI_AP) &&
-                           WiFi.softAP(localApName.c_str(), localApPassword.c_str());
-    if (apStarted) {
-        Serial.printf("Upper tank local AP started: SSID=%s IP=192.168.4.1\n", localApName.c_str());
-    } else {
-        Serial.println("Upper tank service AP could not start.");
-    }
+    WiFi.setAutoReconnect(false);
     static const char* requestHeaders[] = {"Origin", "Host"};
     localWebServer.collectHeaders(requestHeaders, 2);
     localWebServer.on("/", HTTP_GET, handleLocalRoot);
@@ -918,20 +920,68 @@ void startLocalWeb() {
     localWebServer.on("/update", HTTP_POST, handleLocalUpdateComplete, handleLocalUpdateUpload);
     localWebServer.onNotFound([]() { if (!requireLocalAuth()) return; localWebServer.send(404, "text/plain", "Not found"); });
     localWebServer.begin();
+    lastManagementLinkMs = millis();
+    lastServiceApAttemptMs = lastManagementLinkMs;
     localWebReady = true;
 }
 
 void maintainLocalWifi(uint32_t now) {
     if (!localWebReady || savedWifiSsid.length() == 0) return;
-    if (!wifiReconnectRequested &&
-        (WiFi.status() == WL_CONNECTED || now - lastWifiAttemptMs < 30000U)) return;
 
+    if (wifiReconnectRequested || (!wifiAttemptPending &&
+        !(WiFi.STA.connected() && WiFi.STA.hasIP()) &&
+        now - lastWifiAttemptMs >= WIFI_RETRY_INTERVAL_MS)) {
+        wifiReconnectRequested = false;
+        lastWifiAttemptMs = now;
+        wifiAttemptPending = WiFi.enableSTA(true);
+        if (wifiAttemptPending) {
+            WiFi.disconnectAsync(false, false);
+        } else {
+            Serial.println("Upper tank Wi-Fi STA initialization failed; will retry.");
+        }
+        return;
+    }
+
+    if (!wifiAttemptPending || now - lastWifiAttemptMs < 250U) return;
+    if (!WiFi.STA.started() || WiFi.STA.connected()) {
+        if (now - lastWifiAttemptMs >= 2000U) {
+            wifiAttemptPending = false;
+            wifiReconnectRequested = true;
+            Serial.println("Upper tank Wi-Fi STA not ready for new credentials; will retry.");
+        }
+        return;
+    }
+
+    wifiAttemptPending = false;
     lastWifiAttemptMs = now;
-    wifiReconnectRequested = false;
-    if (WiFi.mode(WIFI_AP_STA)) {
-        WiFi.begin(savedWifiSsid.c_str(), savedWifiPassword.c_str());
+    if (!WiFi.STA.connect(savedWifiSsid.c_str(), savedWifiPassword.c_str())) {
+        Serial.println("Upper tank Wi-Fi connection could not start; will retry.");
+    }
+}
+
+void maintainServiceAp(uint32_t now) {
+    if (!localWebReady) return;
+    const bool wifiReady = WiFi.STA.connected() && WiFi.STA.hasIP();
+    const bool ethernetReady = ethernetStarted && ETH.linkUp() && ETH.hasIP();
+    if (wifiReady || ethernetReady) {
+        lastManagementLinkMs = now;
+        if (serviceApActive && WiFi.enableAP(false)) {
+            serviceApActive = false;
+            Serial.println("Upper tank service AP stopped: management link restored.");
+        }
+        return;
+    }
+
+    if (serviceApActive || now - lastManagementLinkMs < MANAGEMENT_LINK_GRACE_MS ||
+        now - lastServiceApAttemptMs < 5000U) return;
+    lastServiceApAttemptMs = now;
+    serviceApActive = WiFi.softAP(localApName.c_str(), localApPassword.c_str());
+    if (serviceApActive) {
+        Serial.printf("Upper tank local AP started: SSID=%s IP=%s\n",
+                      localApName.c_str(), WiFi.softAPIP().toString().c_str());
     } else {
-        Serial.println("Upper tank Wi-Fi STA initialization failed; will retry.");
+        WiFi.enableAP(false);
+        Serial.println("Upper tank service AP could not start; will retry.");
     }
 }
 
@@ -946,7 +996,7 @@ void startEthernet() {
 
 void reportEthernetAddress() {
     if (!ethernetStarted) return;
-    const IPAddress ip = ETH.hasIP() ? ETH.localIP() : IPAddress();
+    const IPAddress ip = ETH.linkUp() && ETH.hasIP() ? ETH.localIP() : IPAddress();
     if (ip == reportedEthernetIp) return;
     reportedEthernetIp = ip;
     if (ip != IPAddress()) {
@@ -980,7 +1030,7 @@ void setup() {
         HwcPins::Esp32_2::PUMP_SAFETY_OUTPUTS_ENABLED, writePumpSafetyRelayLevel);
     delay(250);
     Serial.println();
-    Serial.println("HOME WATER CONTROLLER - ESP32 #2 / REV99 CORE 3 BENCH");
+    Serial.println("HOME WATER CONTROLLER - ESP32 #2 / REV100 CORE 3 BENCH");
     Serial.println("SENSOR ACQUISITION STAGE - UPPER PUMP SAFETY RELAY ENABLED");
     Serial.printf("W5500 pin plan: SCK=%u MISO=%u MOSI=%u CS=%u RST=%u\n",
                   HwcPins::Esp32_2::W5500_SCK, HwcPins::Esp32_2::W5500_MISO,
@@ -1084,6 +1134,7 @@ void loop() {
     if (localWebReady) localWebServer.handleClient();
     const uint32_t now = millis();
     maintainLocalWifi(now);
+    maintainServiceAp(now);
     reportEthernetAddress();
     maintainWaterTemperature(now);
     if (static_cast<uint32_t>(now - lastReportMs) >= 2000U) {

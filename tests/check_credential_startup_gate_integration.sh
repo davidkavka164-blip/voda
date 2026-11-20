@@ -20,7 +20,9 @@ awk '/bool startConfigAp\(bool keepStation\)/,/^}/ { print }' "$ESP1" | grep -q 
 
 # ESP32 #2 must not call softAP before all three credentials pass the startup gate.
 awk '/void startLocalWeb\(\)/,/^}/ { print }' "$ESP2" | grep -q 'if (!credentialsReady)'
-awk '/void startLocalWeb\(\)/,/^}/ { print }' "$ESP2" | grep -q 'WiFi.softAP'
+awk '/void maintainServiceAp\(uint32_t now\)/,/^}/ { print }' "$ESP2" | grep -Fq 'if (!localWebReady) return;'
+awk '/void maintainServiceAp\(uint32_t now\)/,/^}/ { print }' "$ESP2" | grep -Fq 'WiFi.softAP'
+awk '/void startLocalWeb\(\)/,/^}/ { print }' "$ESP2" | grep -Fq 'localWebReady = true;'
 
 # The main dashboard no longer exposes the AP password in HTML.
 if grep -q 'htmlEscape(apPassword)' "$ESP1"; then

@@ -53,3 +53,23 @@ ostatní formuláře. Nabízí odkaz **Zpět na přehled** na `/`, který po
 restartu otevře základní stránku bez opakování nahrávání. Výsledek prvního
 nahrání REV99 ještě zobrazí firmware REV98. Odkaz lze ověřit po další
 aktualizaci spuštěné z běžící REV99.
+
+## REV100
+
+Servisní AP ESP32 #2 se spouští po 30 sekundách bez domácí Wi-Fi i
+Ethernetu s IP adresou. Po startu běží stejná ochranná lhůta. Jakmile je
+alespoň jedno z těchto připojení opět dostupné, servisní AP se vypne.
+Přihlašovací údaje domácí Wi-Fi lze uložit z ovládacího webu přes Ethernet.
+Jednotka nejprve požádá o ukončení předchozího spojení nebo pokusu a poté
+spustí připojení s novými údaji. Skutečné připojení a IP ukazuje přehled.
+
+Stolní zkouška REV100 s odpojeným výstupem čerpadla:
+1. Přes Ethernet ulož správné údaje domácí Wi-Fi. Na přehledu ověř stav
+   „Připojeno“ a otevři zobrazenou Wi-Fi IP. Servisní AP má být vypnutý.
+2. Zkus výpadek jen jednoho rozhraní. Druhé rozhraní má obsloužit web a
+   servisní AP má zůstat vypnutý.
+3. Ponech obě připojení nedostupná přes 30 sekund. Ověř přihlášení přes
+   servisní AP, potom obnov kabel. Po získání ethernetové IP má AP zhasnout.
+4. Ověř stejný postup při startu bez obou připojení.
+
+REV100 je stolní sestava pro ověření těchto změn na desce.
