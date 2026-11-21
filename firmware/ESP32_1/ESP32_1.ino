@@ -39,6 +39,7 @@
 #include <WebServer.h>
 #include <Update.h>
 #include <Preferences.h>
+#include <nvs.h>
 #include "src/NvsCredentialTextStorage.h"
 #include "src/CredentialStore.h"
 #include "src/NvsCredentialBackend.h"
@@ -120,6 +121,12 @@ HWC::TransferLogic transferLogic;
 HWC::ManualValveControl manualValveControl; // RAM-only; reboot always returns to inactive/CLOSE_ALL.
 HWC::ValveRelayOutput manualValveRelayOutput;
 bool manualValveRelayOutputReady = false;
+constexpr uint8_t WELL_PUMP_HOLD = 1;
+constexpr uint8_t LOWER_PUMP_HOLD = 2;
+constexpr uint8_t ALL_PUMP_HOLDS = WELL_PUMP_HOLD | LOWER_PUMP_HOLD;
+uint8_t pumpHolds = ALL_PUMP_HOLDS;
+bool pumpHoldStorageReady = false;
+
 HWC::PumpSafetyRelayOutput wellPumpSafetyRelayOutput;
 HWC::PumpSafetyRelayOutput lowerPumpSafetyRelayOutput;
 bool wellPumpSafetyRelayReady = false;
@@ -409,6 +416,26 @@ void writePumpSafetyRelayLevel(uint8_t pin, bool high) {
     digitalWrite(pin, high ? HIGH : LOW);
 }
 
+void loadPumpHolds() {
+    nvs_handle_t handle;
+    if (nvs_open("hwc_pump_stop", NVS_READWRITE, &handle) != ESP_OK) return;
+    uint8_t stored = 0;
+    const esp_err_t result = nvs_get_u8(handle, "holds", &stored);
+    nvs_close(handle);
+    if (result == ESP_ERR_NVS_NOT_FOUND || (result == ESP_OK && stored <= ALL_PUMP_HOLDS)) {
+        pumpHolds = stored;
+        pumpHoldStorageReady = true;
+    }
+}
+
+bool savePumpHolds(uint8_t holds) {
+    nvs_handle_t handle;
+    if (nvs_open("hwc_pump_stop", NVS_READWRITE, &handle) != ESP_OK) return false;
+    const bool saved = nvs_set_u8(handle, "holds", holds) == ESP_OK && nvs_commit(handle) == ESP_OK;
+    nvs_close(handle);
+    return saved;
+}
+
 void syncPumpSafetyRelayOutputs(uint32_t nowMs) {
     const bool wellFresh = HWC::sampleIsFresh(haveWellReading, nowMs, lastWellReadingMs, 5000U);
     const bool lowerFresh = HWC::sampleIsFresh(haveLowerTankReading, nowMs, lastLowerTankReadingMs, 5000U);
@@ -416,10 +443,10 @@ void syncPumpSafetyRelayOutputs(uint32_t nowMs) {
         (wellFresh && pumpProtectionState.pumpPermit);
     const bool lowerPermit = lowerPumpState.emergencyModeActive ||
         (lowerFresh && lowerPumpState.pumpPermit);
-    if (!wellPumpSafetyRelayReady || !wellPumpSafetyRelayOutput.applyPermit(wellPermit)) {
+    if (!wellPumpSafetyRelayReady || !wellPumpSafetyRelayOutput.applyPermit(!(pumpHolds & WELL_PUMP_HOLD) && wellPermit)) {
         if (wellPumpSafetyRelayReady) wellPumpSafetyRelayOutput.forceOff();
     }
-    if (!lowerPumpSafetyRelayReady || !lowerPumpSafetyRelayOutput.applyPermit(lowerPermit)) {
+    if (!lowerPumpSafetyRelayReady || !lowerPumpSafetyRelayOutput.applyPermit(!(pumpHolds & LOWER_PUMP_HOLD) && lowerPermit)) {
         if (lowerPumpSafetyRelayReady) lowerPumpSafetyRelayOutput.forceOff();
     }
 }
@@ -873,10 +900,57 @@ void updateTransferControl(uint32_t nowMs) {
     transferStopRequested = false;
 }
 
+void handlePumpHold() {
+    if (!requireWebAuth()) return;
+    const String pump = webServer.arg("pump");
+    const String action = webServer.arg("action");
+    if ((pump != "well" && pump != "lower") || (action != "stop" && action != "resume")) {
+        sendResult("Neplatný povel čerpadla.", false);
+        return;
+    }
+
+    const bool well = pump == "well";
+    const uint8_t bit = well ? WELL_PUMP_HOLD : LOWER_PUMP_HOLD;
+    if (action == "stop") {
+        pumpHolds |= bit;
+        if (well) {
+            wellPumpSafetyRelayOutput.forceOff();
+            emergencyDisableRequested = true;
+            emergencyEnableRequested = false;
+            emergencyConfirmationRequested = false;
+        } else {
+            lowerPumpSafetyRelayOutput.forceOff();
+            lowerEmergencyDisableRequested = true;
+            lowerEmergencyEnableRequested = false;
+            lowerEmergencyConfirmationRequested = false;
+        }
+        const bool saved = pumpHoldStorageReady && savePumpHolds(pumpHolds);
+        sendResult(saved ? "Čerpadlo má povel odpojit napájení. Ruční vypnutí je uloženo." :
+            "Čerpadlo má povel odpojit napájení, ale ruční vypnutí se nepodařilo uložit pro další start.", saved);
+        return;
+    }
+    if (!(pumpHolds & bit)) {
+        sendResult("Čerpadlo už je pod běžnou ochranou.", true);
+        return;
+    }
+    if (well ? pumpProtectionState.emergencyModeActive : lowerPumpState.emergencyModeActive) {
+        sendResult("Počkejte na ukončení nouzového režimu a obnovte stránku.", false);
+        return;
+    }
+    const uint8_t next = pumpHolds & ~bit;
+    if (!pumpHoldStorageReady || !savePumpHolds(next)) {
+        sendResult("Ruční vypnutí trvá. Změnu se nepodařilo uložit.", false);
+        return;
+    }
+    pumpHolds = next;
+    sendResult("Ruční vypnutí uvolněno. Napájení čerpadla dál řídí běžná ochrana.", true);
+}
+
 void appendTransferAction(String& h, const char* source, const char* title, const char* blocker) {
     h += "<details class='route'><summary>";
     h += title;
-    h += blocker ? " · Blokováno" : " · Nastavit";
+    h += " <b class='relay-state relay-on'>ON</b>";
+    if (blocker) h += " <span class='warn'>Blokováno</span>";
     h += "</summary><div class='route-body'>";
     if (blocker) {
         h += "<p class='warn'>";
@@ -893,15 +967,17 @@ void appendTransferAction(String& h, const char* source, const char* title, cons
 }
 
 void appendRelayCard(String& h, const char* title, bool ready, bool energized,
-                     const char* mode, const char* onText = nullptr, const char* offText = nullptr) {
+                     const char* mode, const char* onText, const char* offText,
+                     const char* pump = nullptr, bool held = false, bool manualValve = false) {
     h += "<div class='status-card'><strong>";
     h += title;
     h += "</strong><p>";
     if (!ready) {
         h += "<b class='relay-state relay-fault'>CHYBA</b> Výstup nepřipraven";
     } else {
-        h += energized ? "<b class='relay-state relay-on'>ON</b>" :
-                         "<b class='relay-state relay-off'>OFF</b>";
+        if (!energized) h += "<b class='relay-state relay-off'>OFF</b>";
+        else h += pump ? "<b class='relay-state relay-on'>ON</b>" :
+                         "<b class='relay-state relay-on'>RUN</b>";
     }
     h += " ";
     h += mode;
@@ -910,7 +986,20 @@ void appendRelayCard(String& h, const char* title, bool ready, bool energized,
         h += "<br>";
         h += detail;
     }
-    h += "</p></div>";
+    h += "</p>";
+    if (pump && (energized || held)) {
+        h += "<form method='post' action='/pump-hold'><input type='hidden' name='pump' value='";
+        h += pump;
+        h += "'>";
+        h += held ? "<button type='submit' name='action' value='resume'>Obnovit automatiku</button>" :
+                    "<button class='stop' type='submit' name='action' value='stop'>Vypnout čerpadlo</button>";
+        h += "</form>";
+    } else if (!pump && ready && energized) {
+        h += manualValve
+            ? "<form method='post' action='/manual-valve-command'><button class='stop' type='submit' name='command' value='close'>STOP</button></form>"
+            : "<form method='post' action='/transfer-stop'><button class='stop' type='submit'>STOP</button></form>";
+    }
+    h += "</div>";
 }
 
 void handleRoot() {
@@ -970,22 +1059,26 @@ void handleRoot() {
             ? "Servisní režim" : emergencyMode);
 
     appendRelayCard(h, "Ventil studny", manualValveRelayOutputReady,
-        manualValveRelayOutput.wellRelayEnergized(), valveMode);
+        manualValveRelayOutput.wellRelayEnergized(), valveMode, nullptr, nullptr, nullptr, false, manualActive);
     appendRelayCard(h, "Ventil horní nádrže", manualValveRelayOutputReady,
-        manualValveRelayOutput.upperRelayEnergized(), valveMode);
+        manualValveRelayOutput.upperRelayEnergized(), valveMode, nullptr, nullptr, nullptr, false, manualActive);
     appendRelayCard(h, "Čerpadlo studny", wellPumpSafetyRelayReady, wellPumpSafetyRelayOutput.energized(),
         pumpProtectionState.emergencyModeActive ? emergencyMode : automaticMode,
         "Napájení povoleno",
+        (pumpHolds & WELL_PUMP_HOLD) ? "Ruční vypnutí." :
         !wellLevelValid ? "Chybí platná hladina." : pumpProtectionState.sensorWarning ?
         "Zkontrolujte čidlo a nastavení ochrany." : pumpProtectionState.criticalLevelLatched ?
-        "Čeká na obnovovací hladinu." : "Ochrana odebrala povolení.");
+        "Čeká na obnovovací hladinu." : "Ochrana odebrala povolení.",
+        "well", pumpHolds & WELL_PUMP_HOLD);
     appendRelayCard(h, "Čerpadlo dolní nádrže", lowerPumpSafetyRelayReady, lowerPumpSafetyRelayOutput.energized(),
         lowerPumpState.emergencyModeActive ? emergencyMode : automaticMode,
         "Napájení povoleno",
+        (pumpHolds & LOWER_PUMP_HOLD) ? "Ruční vypnutí." :
         !lowerLevelValid ? "Chybí platná hladina." : lowerPumpState.sensorWarning ?
         "Zkontrolujte čidlo a nastavení ochrany." : lowerPumpState.startupValidationRequired ?
         "Čeká na ověření po startu." : lowerPumpState.criticalLevelLatched ?
-        "Čeká na obnovovací hladinu." : "Ochrana odebrala povolení.");
+        "Čeká na obnovovací hladinu." : "Ochrana odebrala povolení.",
+        "lower", pumpHolds & LOWER_PUMP_HOLD);
 
     h += "<div class='status-card'><strong>Přítok do dolní nádrže</strong><p>";
     if (!lowerLevelValid) h += "<b class='warn'>Hladina nedostupná</b>";
@@ -1030,8 +1123,8 @@ void handleRoot() {
         if (commonBlocker) { h += " · "; h += commonBlocker; }
         h += "</p>";
     }
-    appendTransferAction(h, "well", "Studna → dolní nádrž", wellBlocker);
-    appendTransferAction(h, "upper", "Horní → dolní nádrž", upperBlocker);
+    appendTransferAction(h, "well", "Studna", wellBlocker);
+    appendTransferAction(h, "upper", "Horní nádrž", upperBlocker);
     if (transferOutputs.state == HWC::TRANSFER_RUNNING) {
         h += "<p>Odhad přírůstku: " + String(transferOutputs.estimatedTransferredLiters, 1)
              + " / " + String(pendingTransferRequest.requestedLiters, 0) + " l.</p>";
@@ -1237,7 +1330,7 @@ void handleRoot() {
         else h += ETH.linkUp() ? "Čeká se na DHCP" : "Fyzický link je odpojen";
         h += "</p>";
     }
-    h += "<p>Ovládací web je dostupný přes Ethernet i Wi-Fi. REV110 Core 3 – stolní zkouška.</p>";
+    h += "<p>Ovládací web je dostupný přes Ethernet i Wi-Fi. REV111 Core 3 – stolní zkouška.</p>";
     h += apMode ? "<p>Servisní AP je zapnutý.</p>" : "<p>Servisní AP je vypnutý.</p>";
     if (apMode) {
         h += "<p>Adresa AP: " + WiFi.softAPIP().toString() + "<br>AP: <b>" + htmlEscape(apName) + "</b></p>";
@@ -1644,6 +1737,10 @@ void handleLowerPumpEmergency() {
         sendResult("Požadavek na ukončení nouzového režimu dolního čerpadla byl přijat.", true);
         return;
     }
+    if (pumpHolds & LOWER_PUMP_HOLD) {
+        sendResult("Čerpadlo je ručně vypnuté. Nejdříve uvolněte ruční vypnutí.", false);
+        return;
+    }
     if (mode != "enable" || !webServer.hasArg("physical") || webServer.arg("physical") != "yes") {
         sendResult("Nouzové povolení vyžaduje výslovné potvrzení fyzické kontroly hladiny.", false);
         return;
@@ -1690,6 +1787,10 @@ void handlePumpEmergency() {
         emergencyEnableRequested = false;
         emergencyConfirmationRequested = false;
         sendResult("Požadavek na ukončení nouzového režimu byl přijat.", true);
+        return;
+    }
+    if (pumpHolds & WELL_PUMP_HOLD) {
+        sendResult("Čerpadlo je ručně vypnuté. Nejdříve uvolněte ruční vypnutí.", false);
         return;
     }
     if (!(mode == "enable")) { sendResult("Neznámá nouzová akce.", false); return; }
@@ -2157,6 +2258,7 @@ void startWebAndNetwork() {
     webServer.on("/transfer-stop", HTTP_POST, handleTransferStop);
     webServer.on("/inflow-watchdog-config", HTTP_POST, handleInflowWatchdogConfig);
     webServer.on("/transfer-recovery-ack", HTTP_POST, handleTransferRecoveryAck);
+    webServer.on("/pump-hold", HTTP_POST, handlePumpHold);
     webServer.on("/pump-emergency", HTTP_POST, handlePumpEmergency);
     webServer.on("/manual-valve-mode", HTTP_POST, handleManualValveMode);
     webServer.on("/manual-valve-command", HTTP_POST, handleManualValveCommand);
@@ -2197,9 +2299,11 @@ void setup() {
         HwcPins::Esp32_1::VALVE_2_RELAY,
         HwcPins::Esp32_1::VALVE_RELAY_ACTIVE_HIGH,
         writeValveRelayLevel);
+    loadPumpHolds();
+    if (!pumpHoldStorageReady) Serial.println("ERROR: manual pump stop storage unavailable; both pump outputs held off.");
     delay(250);
     Serial.println();
-    Serial.println("HOME WATER CONTROLLER - ESP32 #1 / REV110 CORE 3 BENCH");
+    Serial.println("HOME WATER CONTROLLER - ESP32 #1 / REV111 CORE 3 BENCH");
     Serial.println("DEVELOPMENT BUILD - VALVE RELAYS AND PUMP SAFETY OUTPUTS ENABLED");
     // Relay pins were initialized OFF before the startup delay above.
     Serial.printf("Valve relay driver: %s; well GPIO=%u, upper GPIO=%u, active-high; relay board supply 5V\n",
