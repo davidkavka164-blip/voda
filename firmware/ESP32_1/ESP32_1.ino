@@ -121,6 +121,8 @@ HWC::TransferLogic transferLogic;
 HWC::ManualValveControl manualValveControl; // RAM-only; reboot always returns to inactive/CLOSE_ALL.
 HWC::ValveRelayOutput manualValveRelayOutput;
 bool manualValveRelayOutputReady = false;
+uint16_t transferMaxMinutes = 0;
+
 constexpr uint8_t WELL_PUMP_HOLD = 1;
 constexpr uint8_t LOWER_PUMP_HOLD = 2;
 constexpr uint8_t ALL_PUMP_HOLDS = WELL_PUMP_HOLD | LOWER_PUMP_HOLD;
@@ -640,6 +642,34 @@ void updateManualValveSafety(uint32_t nowMs) {
     }
 }
 
+void loadTransferMaxMinutes() {
+    nvs_handle_t handle;
+    if (nvs_open("hwc_transfer", NVS_READWRITE, &handle) != ESP_OK) return;
+    uint16_t minutes = 0;
+    const esp_err_t result = nvs_get_u16(handle, "max_min", &minutes);
+    nvs_close(handle);
+    if (result == ESP_ERR_NVS_NOT_FOUND) transferMaxMinutes = 10;
+    else if (result == ESP_OK && minutes >= 1 && minutes <= 120) transferMaxMinutes = minutes;
+}
+
+void handleTransferMaxMinutes() {
+    if (!requireWebAuth()) return;
+    uint32_t minutes = 0;
+    if (!parseUnsignedStrict(webServer.arg("max_min"), minutes) || minutes < 1 || minutes > 120) {
+        sendResult("Zadejte maximální dobu v rozsahu 1–120 minut.", false);
+        return;
+    }
+    nvs_handle_t handle;
+    if (nvs_open("hwc_transfer", NVS_READWRITE, &handle) != ESP_OK) {
+        sendResult("Nastavení maximální doby se nepodařilo otevřít.", false);
+        return;
+    }
+    const bool saved = nvs_set_u16(handle, "max_min", minutes) == ESP_OK && nvs_commit(handle) == ESP_OK;
+    nvs_close(handle);
+    if (saved) transferMaxMinutes = minutes;
+    sendResult(saved ? "Maximální doba uložena pro další transfer." : "Zápis maximální doby selhal.", saved);
+}
+
 void handleTransferStart() {
     if (!requireWebAuth()) return;
     if (manualValveControl.active()) {
@@ -655,20 +685,23 @@ void handleTransferStart() {
     const String sourceText = webServer.arg("source");
     const HWC::TransferSource source = sourceText == "well" ? HWC::TRANSFER_SOURCE_WELL :
         (sourceText == "upper" ? HWC::TRANSFER_SOURCE_UPPER_TANK : HWC::TRANSFER_SOURCE_NONE);
-    float liters = 0.0f, timeoutMinutes = 0.0f;
+    if (!transferMaxMinutes) {
+        sendResult("Maximální doba přečerpávání není platná. Uložte ji v nastavení.", false);
+        return;
+    }
+    float liters = 0.0f;
     if (source == HWC::TRANSFER_SOURCE_WELL && !wellProtectionConfigConfigured) {
         sendResult("Transfer ze studny je blokován: nejsou platně nastaveny bezpečnostní meze ochrany čerpadla.", false); return;
     }
     if (source == HWC::TRANSFER_SOURCE_NONE || !parseFloatStrict(webServer.arg("liters"), liters) ||
-        !parseFloatStrict(webServer.arg("timeout"), timeoutMinutes) || liters <= 0.0f || liters > 7000.0f ||
-        timeoutMinutes < 1.0f || timeoutMinutes > 120.0f) {
-        sendResult("Zadejte zdroj, objem 0–7000 l a časový limit 1–120 minut.", false); return;
+        liters <= 0.0f || liters > 7000.0f) {
+        sendResult("Zadejte zdroj a objem větší než 0 a nejvýše 7000 l.", false); return;
     }
     pendingTransferRequest.requestId = (static_cast<uint32_t>(esp_random()) ^ (++transferRequestCounter));
     if (pendingTransferRequest.requestId == 0) pendingTransferRequest.requestId = ++transferRequestCounter;
     pendingTransferRequest.source = source;
     pendingTransferRequest.requestedLiters = liters;
-    pendingTransferRequest.timeoutMs = static_cast<uint32_t>(timeoutMinutes * 60000.0f);
+    pendingTransferRequest.timeoutMs = static_cast<uint32_t>(transferMaxMinutes) * 60000UL;
     if (!transferJournalStorageReady || !transferHistoryStorageReady || transferHistoryStorageFault ||
         !transferRestartGuard.canStart() ||
         !transferRestartGuard.prepare(pendingTransferRequest.requestId, source, liters)) {
@@ -960,7 +993,6 @@ void appendTransferAction(String& h, const char* source, const char* title, cons
         h += "<form method='post' action='/transfer-start'><input type='hidden' name='source' value='";
         h += source;
         h += "'><label>Přírůstek v dolní nádrži (l)<input name='liters' type='number' min='1' max='7000' step='1' value='500' required></label>"
-             "<label>Časový limit (min)<input name='timeout' type='number' min='1' max='120' step='1' value='10' required></label>"
              "<button type='submit'>Potvrdit spuštění</button></form>";
     }
     h += "</div></details>";
@@ -1028,6 +1060,7 @@ void handleRoot() {
     const char* commonBlocker = nullptr;
     if (manualActive) commonBlocker = "Je aktivní ruční režim ventilů.";
     else if (busy) commonBlocker = "Transfer už probíhá nebo čeká na kontrolu.";
+    else if (!transferMaxMinutes) commonBlocker = "Uložte maximální dobu přečerpávání v nastavení.";
     else if (!manualValveRelayOutputReady) commonBlocker = "Výstupy ventilů nejsou připravené.";
     else if (!transferJournalStorageReady || !transferHistoryStorageReady ||
              transferHistoryStorageFault || !transferRestartGuard.canStart())
@@ -1274,6 +1307,11 @@ void handleRoot() {
     h += "<section><h3>Horní nádrž / ESP32 #2</h3>";
     h += "<p>ESP32 #2 samostatně hlídá horní čerpadlo proti chodu nasucho a měří teplotu vody. ESP32 #1 řídí ventily a sleduje přítok do dolní nádrže.</p></section>";
     h += "<h2>Konfigurace a servis</h2>";
+    h += "<section><h3>Maximální doba přečerpávání</h3><form method='post' action='/transfer-max-minutes'>"
+         "<label>Limit pro obě trasy (min)<input type='number' name='max_min' required min='1' max='120' value='";
+    if (transferMaxMinutes) h += String(transferMaxMinutes);
+    h += "'></label><button type='submit'>Uložit maximální dobu</button></form>"
+         "<small>Platí od příštího přečerpávání. Kontrola přítoku z horní nádrže je samostatná.</small></section>";
     h += "<section><h3>Meze ochrany studničního čerpadla</h3>";
     h += "<form method='post' action='/protection-config'><h4>Hladinové meze (cm)</h4><label>Transferové minimum (neodpojuje samo o sobě čerpadlo)</label><input name='transferMin' type='number' min='0' max='2000' step='0.1' required value='";
     if (protectionConfigLoaded) h += String(wellProtectionConfig.transferMinimumLevelCm, 1);
@@ -1330,7 +1368,7 @@ void handleRoot() {
         else h += ETH.linkUp() ? "Čeká se na DHCP" : "Fyzický link je odpojen";
         h += "</p>";
     }
-    h += "<p>Ovládací web je dostupný přes Ethernet i Wi-Fi. REV111 Core 3 – stolní zkouška.</p>";
+    h += "<p>Ovládací web je dostupný přes Ethernet i Wi-Fi. REV112 Core 3 – stolní zkouška.</p>";
     h += apMode ? "<p>Servisní AP je zapnutý.</p>" : "<p>Servisní AP je vypnutý.</p>";
     if (apMode) {
         h += "<p>Adresa AP: " + WiFi.softAPIP().toString() + "<br>AP: <b>" + htmlEscape(apName) + "</b></p>";
@@ -2256,6 +2294,7 @@ void startWebAndNetwork() {
     webServer.on("/lower-pump-emergency", HTTP_POST, handleLowerPumpEmergency);
     webServer.on("/transfer-start", HTTP_POST, handleTransferStart);
     webServer.on("/transfer-stop", HTTP_POST, handleTransferStop);
+    webServer.on("/transfer-max-minutes", HTTP_POST, handleTransferMaxMinutes);
     webServer.on("/inflow-watchdog-config", HTTP_POST, handleInflowWatchdogConfig);
     webServer.on("/transfer-recovery-ack", HTTP_POST, handleTransferRecoveryAck);
     webServer.on("/pump-hold", HTTP_POST, handlePumpHold);
@@ -2300,10 +2339,11 @@ void setup() {
         HwcPins::Esp32_1::VALVE_RELAY_ACTIVE_HIGH,
         writeValveRelayLevel);
     loadPumpHolds();
+    loadTransferMaxMinutes();
     if (!pumpHoldStorageReady) Serial.println("ERROR: manual pump stop storage unavailable; both pump outputs held off.");
     delay(250);
     Serial.println();
-    Serial.println("HOME WATER CONTROLLER - ESP32 #1 / REV111 CORE 3 BENCH");
+    Serial.println("HOME WATER CONTROLLER - ESP32 #1 / REV112 CORE 3 BENCH");
     Serial.println("DEVELOPMENT BUILD - VALVE RELAYS AND PUMP SAFETY OUTPUTS ENABLED");
     // Relay pins were initialized OFF before the startup delay above.
     Serial.printf("Valve relay driver: %s; well GPIO=%u, upper GPIO=%u, active-high; relay board supply 5V\n",

@@ -29,6 +29,7 @@
 #include <WebServer.h>
 #include <Update.h>
 #include <Preferences.h>
+#include <nvs.h>
 #include "src/NvsCredentialTextStorage.h"
 #include "src/CredentialStore.h"
 #include "src/NvsCredentialBackend.h"
@@ -78,6 +79,8 @@ bool localOtaSucceeded = false;
 String localOtaError;
 bool haveUpperReading = false;
 HWC::LevelSensorReading lastUpperReading = {};
+bool upperPumpHeld = true;
+bool upperPumpHoldStorageReady = false;
 bool upperEmergencyEnableRequested = false;
 bool upperEmergencyConfirmationRequested = false;
 bool upperEmergencyDisableRequested = false;
@@ -192,11 +195,31 @@ void writePumpSafetyRelayLevel(uint8_t pin, bool high) {
     digitalWrite(pin, high ? HIGH : LOW);
 }
 
+void loadUpperPumpHold() {
+    nvs_handle_t handle;
+    if (nvs_open("hwc_pump_stop", NVS_READWRITE, &handle) != ESP_OK) return;
+    uint8_t stored = 0;
+    const esp_err_t result = nvs_get_u8(handle, "upper", &stored);
+    nvs_close(handle);
+    if (result == ESP_ERR_NVS_NOT_FOUND || (result == ESP_OK && stored <= 1)) {
+        upperPumpHeld = stored != 0;
+        upperPumpHoldStorageReady = true;
+    }
+}
+
+bool saveUpperPumpHold(bool held) {
+    nvs_handle_t handle;
+    if (nvs_open("hwc_pump_stop", NVS_READWRITE, &handle) != ESP_OK) return false;
+    const bool saved = nvs_set_u8(handle, "upper", held) == ESP_OK && nvs_commit(handle) == ESP_OK;
+    nvs_close(handle);
+    return saved;
+}
+
 void syncUpperPumpSafetyRelay(uint32_t nowMs) {
     const bool readingFresh = haveUpperReading && static_cast<uint32_t>(nowMs - lastReportMs) <= 5000U;
     const bool permit = upperPumpProtectionState.emergencyModeActive ||
         (readingFresh && upperPumpProtectionState.pumpPermit);
-    if (!upperPumpSafetyRelayReady || !upperPumpSafetyRelayOutput.applyPermit(permit)) {
+    if (!upperPumpSafetyRelayReady || !upperPumpSafetyRelayOutput.applyPermit(!upperPumpHeld && permit)) {
         if (upperPumpSafetyRelayReady) upperPumpSafetyRelayOutput.forceOff();
     }
 }
@@ -458,7 +481,7 @@ void appendUpperTankVolume(String& html) {
 void handleLocalRoot() {
     if (!requireLocalAuth()) return;
     String h = "<!doctype html><html lang='cs'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>";
-    h += "<title>HWC – horní nádrž</title><style>body{font:16px Arial;max-width:800px;margin:20px auto;padding:0 14px;background:#f4f6f8;color:#17202a}section{background:#fff;padding:16px;margin:14px 0;border-radius:10px}input{box-sizing:border-box;width:100%;padding:9px;margin:5px 0 12px}button{padding:10px 16px}.warn{color:#9b1c1c}</style>";
+    h += "<title>HWC – horní nádrž</title><style>body{font:16px Arial;max-width:800px;margin:20px auto;padding:0 14px;background:#f4f6f8;color:#17202a}section{background:#fff;padding:16px;margin:14px 0;border-radius:10px}input{box-sizing:border-box;width:100%;padding:9px;margin:5px 0 12px}button{padding:10px 16px}.warn{color:#9b1c1c}.badge,.stop{border:0;border-radius:6px;color:white;font-weight:bold}.badge{padding:3px 9px}.on{background:#176241}.off,.stop{background:#a12525}.fault{background:#725019}</style>";
     h += HWC::WATER_LEVEL_SKETCH_CSS;
     h += "</head><body><h1>HOME WATER CONTROLLER</h1><h2>ESP32 #2 – ochrana horního čerpadla</h2>";
     h += "<section><h3>Teplota vody – DS18B20</h3>";
@@ -484,6 +507,30 @@ void handleLocalRoot() {
                                 upperProtectionConfigValid ? upperTankLimits.usableDepthCm : 0.0f);
     h += "</div>";
     appendUpperTankVolume(h);
+    h += "</section><section><h3>Provozní stav · Čerpadlo horní nádrže</h3><p>";
+    const bool energized = upperPumpSafetyRelayReady && upperPumpSafetyRelayOutput.energized();
+    h += !upperPumpSafetyRelayReady ? "<b class='badge fault'>CHYBA</b>" :
+         (energized ? "<b class='badge on'>ON</b>" : "<b class='badge off'>OFF</b>");
+    h += upperPumpProtectionState.emergencyModeActive ? " Nouzový režim" : " Automatický režim";
+    h += "<br>";
+    if (!upperPumpSafetyRelayReady) h += "Výstup nepřipraven.";
+    else if (energized) h += "Napájení povoleno.";
+    else if (!upperPumpHoldStorageReady) h += "Úložiště ručního vypnutí není dostupné.";
+    else if (upperPumpHeld) h += "Ruční vypnutí.";
+    else if (!levelValid) h += "Chybí platná hladina.";
+    else if (!upperProtectionConfigValid || !upperProtectionStorageReady || !upperSafetyStorageReady)
+        h += "Nastavení ochrany není platné.";
+    else if (upperPumpProtectionState.criticalLevelLatched) h += "Čeká na obnovovací hladinu.";
+    else if (upperPumpProtectionState.startupValidationRequired) h += "Čeká na ověření po startu.";
+    else h += "Ochrana blokuje povolení.";
+    h += "</p>";
+    if (energized || upperPumpHeld) {
+        h += "<form method='post' action='/pump-hold'>";
+        h += upperPumpHeld ? "<button name='action' value='resume' type='submit'>Obnovit automatiku</button>" :
+                            "<button class='stop' name='action' value='stop' type='submit'>Vypnout čerpadlo</button>";
+        h += "</form>";
+    }
+    h += "<details><summary>Diagnostika ochrany</summary>";
     h += "<p>Hladina pro ochranu: ";
     if (HWC::sensorConfigUsableForLevelMeasurement(upperSensorConfigState) &&
         haveUpperReading && lastUpperReading.result.status == HWC::SENSOR_MATH_OK) {
@@ -501,7 +548,7 @@ void handleLocalRoot() {
     h += "</p><p>Nouzový režim: "; h += upperPumpProtectionState.emergencyModeActive ? "AKTIVNÍ" : "vypnutý";
     h += "</p><p>Kritická blokace: "; h += upperPumpProtectionState.criticalLevelLatched ? "AKTIVNÍ" : "neaktivní";
     h += "</p><p>Konfigurace/NVS: "; h += (upperProtectionConfigValid && upperProtectionStorageReady && upperSafetyStorageReady) ? "platná" : "NEPLATNÁ / nedostupná";
-    h += "</p><p class='warn'><b>Nouzový režim po fyzickém ověření hladiny obchází softwarovou ochranu hladiny, kritickou blokaci i chybu konfigurace/NVS. Obsluha přebírá průběžnou kontrolu hladiny. Neobchází jistič, tepelnou/elektrickou ochranu motoru ani fyzickou připravenost bezpečnostního relé. Režim je místní a po restartu se vypne.</b></p></section>";
+    h += "</p><p class='warn'><b>Nouzový režim po fyzickém ověření hladiny obchází softwarovou ochranu hladiny, kritickou blokaci i chybu konfigurace/NVS. Obsluha přebírá průběžnou kontrolu hladiny. Neobchází jistič, tepelnou/elektrickou ochranu motoru ani fyzickou připravenost bezpečnostního relé. Režim je místní a po restartu se vypne.</b></p></details></section>";
     h += "<section><h3>Meze ochrany čerpadla</h3>";
     h += "<form method='post' action='/local-limits'><label>Využitelná hloubka nádrže (cm)</label><input name='depth' type='number' min='20' max='2000' step='0.1' required value='";
     if (upperProtectionConfigValid) h += String(upperTankLimits.usableDepthCm, 1);
@@ -559,7 +606,7 @@ void handleLocalRoot() {
         else h += ETH.linkUp() ? "Čeká se na DHCP" : "Fyzický link je odpojen";
         h += "</p>";
     }
-    h += "<p>Ovládací web je dostupný přes Ethernet i Wi-Fi. REV106 Core 3 – stolní zkouška.</p></section>";
+    h += "<p>Ovládací web je dostupný přes Ethernet i Wi-Fi. REV112 Core 3 – stolní zkouška.</p></section>";
     h += serviceApActive ? "<p>Servisní AP je zapnutý.</p>" : "<p>Servisní AP je vypnutý.</p>";
     h += "<section><h3>Domácí Wi-Fi</h3><p>";
     if (wifiStaDisabled) {
@@ -765,6 +812,34 @@ void handleLocalUpdateComplete() {
     sendLocalResult(localOtaError);
 }
 
+void handleLocalPumpHold() {
+    if (!requireLocalAuth()) return;
+    const String action = localWebServer.arg("action");
+    if (action == "stop") {
+        upperPumpHeld = true;
+        upperPumpSafetyRelayOutput.forceOff();
+        upperEmergencyEnableRequested = false;
+        upperEmergencyConfirmationRequested = false;
+        upperEmergencyDisableRequested = true;
+        const bool saved = upperPumpHoldStorageReady && saveUpperPumpHold(true);
+        sendLocalResult(saved ? "Relé má povel odpojit motor. Ruční vypnutí je uloženo." :
+            "Relé má povel odpojit motor. Ruční vypnutí se nepodařilo uložit pro další start.");
+    } else if (action == "resume") {
+        if (!upperPumpHeld) {
+            sendLocalResult("Čerpadlo už je pod běžnou ochranou.");
+        } else if (upperPumpProtectionState.emergencyModeActive) {
+            sendLocalResult("Počkejte na ukončení nouzového režimu a obnovte stránku.");
+        } else if (upperPumpHoldStorageReady && saveUpperPumpHold(false)) {
+            upperPumpHeld = false;
+            sendLocalResult("Ruční vypnutí uvolněno. Napájení dál řídí běžná ochrana.");
+        } else {
+            sendLocalResult("Ruční vypnutí trvá. Změnu se nepodařilo uložit.");
+        }
+    } else {
+        localWebServer.send(400, "text/plain; charset=utf-8", "Neplatný povel čerpadla.");
+    }
+}
+
 void handleLocalPumpEmergency() {
     if (!requireLocalAuth()) return;
     const String mode = localWebServer.arg("mode");
@@ -773,6 +848,10 @@ void handleLocalPumpEmergency() {
         upperEmergencyEnableRequested = false;
         upperEmergencyConfirmationRequested = false;
         sendLocalResult("Požadavek na ukončení nouzového režimu byl přijat."); return;
+    }
+    if (upperPumpHeld) {
+        localWebServer.send(409, "text/plain; charset=utf-8", "Čerpadlo je ručně vypnuté. Nejdříve uvolněte ruční vypnutí.");
+        return;
     }
     if (!(mode == "enable") || !localWebServer.hasArg("physical") || !(localWebServer.arg("physical") == "yes")) {
         localWebServer.send(400, "text/plain; charset=utf-8", "Nouzové povolení vyžaduje výslovné potvrzení fyzické kontroly."); return;
@@ -1015,6 +1094,7 @@ void startLocalWeb() {
     localWebServer.on("/volume-reference-cancel", HTTP_POST, handleLocalVolumeReferenceCancel);
     localWebServer.on("/volume-transfer", HTTP_POST, handleLocalVolumeTransfer);
     localWebServer.on("/sensor-recovery", HTTP_POST, handleLocalSensorRecovery);
+    localWebServer.on("/pump-hold", HTTP_POST, handleLocalPumpHold);
     localWebServer.on("/pump-emergency", HTTP_POST, handleLocalPumpEmergency);
     localWebServer.on("/update", HTTP_POST, handleLocalUpdateComplete, handleLocalUpdateUpload);
     localWebServer.onNotFound([]() { if (!requireLocalAuth()) return; localWebServer.send(404, "text/plain", "Not found"); });
@@ -1168,9 +1248,11 @@ void setup() {
     upperPumpSafetyRelayReady = upperPumpSafetyRelayOutput.begin(
         HwcPins::Esp32_2::UPPER_TANK_PUMP_SAFETY_RELAY, HwcPins::Esp32_2::PUMP_RELAY_ACTIVE_HIGH,
         HwcPins::Esp32_2::PUMP_SAFETY_OUTPUTS_ENABLED, writePumpSafetyRelayLevel);
+    loadUpperPumpHold();
+    if (!upperPumpHoldStorageReady) Serial.println("ERROR: manual pump stop storage unavailable; upper pump remains off.");
     delay(250);
     Serial.println();
-    Serial.println("HOME WATER CONTROLLER - ESP32 #2 / REV106 CORE 3 BENCH");
+    Serial.println("HOME WATER CONTROLLER - ESP32 #2 / REV112 CORE 3 BENCH");
     Serial.println("SENSOR ACQUISITION STAGE - UPPER PUMP SAFETY RELAY ENABLED");
     Serial.printf("W5500 pin plan: SCK=%u MISO=%u MOSI=%u CS=%u RST=%u\n",
                   HwcPins::Esp32_2::W5500_SCK, HwcPins::Esp32_2::W5500_MISO,
