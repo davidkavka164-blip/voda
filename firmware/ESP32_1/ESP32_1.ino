@@ -308,6 +308,9 @@ String pageStart(const char* title) {
     h += "<style>.level-vessel.well{height:156px;width:76px}"
          ".status-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,180px),1fr));gap:10px}"
          ".status-card,.route{border:1px solid #d8e1eb;border-radius:8px;padding:12px}.status-card p{margin:7px 0 0}"
+         ".relay-state{display:inline-block;border-radius:6px;padding:3px 9px;margin-right:5px;color:white}"
+         ".relay-on{background:#176241}.relay-off{background:#a12525}.relay-fault{background:#725019}"
+         ".status-card details{margin-top:10px}.status-card table{width:100%;margin-top:7px}"
          ".route{margin:10px 0;padding:0}.route summary{padding:10px 12px;background:#eaf2fa;border-radius:8px}"
          ".route-body{padding:4px 12px 12px}.route-body label{display:block;margin-top:8px}"
          "summary{cursor:pointer;font-weight:bold}.good{color:#176241}.running{color:#12578c}"
@@ -889,18 +892,19 @@ void appendTransferAction(String& h, const char* source, const char* title, cons
     h += "</div></details>";
 }
 
-void appendPumpCard(String& h, const char* title, bool ready, bool energized, bool emergency,
-                    const char* reason) {
+void appendRelayCard(String& h, const char* title, bool ready, bool energized,
+                     const char* onText, const char* offText, bool emergency = false) {
     h += "<div class='status-card'><strong>";
     h += title;
     h += "</strong><p>";
-    if (emergency) h += "<span class='warn'>Nouzový režim aktivní</span><br>";
-    h += !ready ? "<b class='warn'>Výstup nepřipraven</b>" :
-         (energized ? "<b class='good'>Napájení povoleno</b>" : "<b class='warn'>Blokováno</b>");
-    if (ready && !energized) {
-        h += "<br>";
-        h += reason;
+    if (!ready) {
+        h += "<b class='relay-state relay-fault'>CHYBA</b> Výstup nepřipraven";
+    } else {
+        h += energized ? "<b class='relay-state relay-on'>ON</b>" :
+                         "<b class='relay-state relay-off'>OFF</b>";
+        h += energized ? onText : offText;
     }
+    if (emergency) h += "<br><span class='warn'>Nouzový režim aktivní</span>";
     h += "</p></div>";
 }
 
@@ -954,40 +958,52 @@ void handleRoot() {
     const char* upperBlocker = commonBlocker;
     if (!upperBlocker && !watchdogReady) upperBlocker = "Kontrola přítoku do dolní nádrže není nastavena.";
 
-    h += "<div class='status-card'><strong>Ventily · povel</strong><p>";
-    if (!manualValveRelayOutputReady) h += "<b class='warn'>Výstup nepřipraven</b>";
-    else if (manualValveRelayOutput.wellRelayEnergized()) h += "<b class='running'>Otevřít trasu ze studny</b>";
-    else if (manualValveRelayOutput.upperRelayEnergized()) h += "<b class='running'>Otevřít trasu z horní nádrže</b>";
-    else h += "Zavřít oba";
-    if (manualActive) h += "<br><b class='warn'>Ruční režim aktivní</b>";
-    h += "</p></div>";
-    appendPumpCard(h, "Čerpadlo studny", wellPumpSafetyRelayReady, wellPumpSafetyRelayOutput.energized(),
-        pumpProtectionState.emergencyModeActive,
+    appendRelayCard(h, "Ventil studny", manualValveRelayOutputReady,
+        manualValveRelayOutput.wellRelayEnergized(), "Povel otevřít", "Povel zavřít");
+    appendRelayCard(h, "Ventil horní nádrže", manualValveRelayOutputReady,
+        manualValveRelayOutput.upperRelayEnergized(), "Povel otevřít", "Povel zavřít");
+    appendRelayCard(h, "Čerpadlo studny", wellPumpSafetyRelayReady, wellPumpSafetyRelayOutput.energized(),
+        "Napájení povoleno",
         !wellLevelValid ? "Chybí platná hladina." : pumpProtectionState.sensorWarning ?
         "Zkontrolujte čidlo a nastavení ochrany." : pumpProtectionState.criticalLevelLatched ?
-        "Čeká na obnovovací hladinu." : "Ochrana odebrala povolení.");
-    appendPumpCard(h, "Čerpadlo dolní nádrže", lowerPumpSafetyRelayReady, lowerPumpSafetyRelayOutput.energized(),
-        lowerPumpState.emergencyModeActive,
+        "Čeká na obnovovací hladinu." : "Ochrana odebrala povolení.",
+        pumpProtectionState.emergencyModeActive);
+    appendRelayCard(h, "Čerpadlo dolní nádrže", lowerPumpSafetyRelayReady, lowerPumpSafetyRelayOutput.energized(),
+        "Napájení povoleno",
         !lowerLevelValid ? "Chybí platná hladina." : lowerPumpState.sensorWarning ?
         "Zkontrolujte čidlo a nastavení ochrany." : lowerPumpState.startupValidationRequired ?
         "Čeká na ověření po startu." : lowerPumpState.criticalLevelLatched ?
-        "Čeká na obnovovací hladinu." : "Ochrana odebrala povolení.");
+        "Čeká na obnovovací hladinu." : "Ochrana odebrala povolení.",
+        lowerPumpState.emergencyModeActive);
 
     h += "<div class='status-card'><strong>Přítok do dolní nádrže</strong><p>";
-    if (!watchdogReady) h += "<b class='warn'>Kontrola horní trasy není nastavena</b>";
-    else if (transferOutputs.state == HWC::TRANSFER_RUNNING &&
-             pendingTransferRequest.source == HWC::TRANSFER_SOURCE_UPPER_TANK)
-        h += "<b class='running'>Sleduje se přírůstek hladiny</b>";
-    else h += "Během transferu z horní nádrže";
+    if (!lowerLevelValid) h += "<b class='warn'>Hladina nedostupná</b>";
+    else if (transferOutputs.state == HWC::TRANSFER_RUNNING) {
+        h += "Přírůstek od startu: " + String(transferOutputs.estimatedTransferredLiters, 1) + " l (odhad)";
+    } else if (!watchdogReady) h += "<b class='warn'>Kontrola horní trasy není nastavena</b>";
+    else h += "Automatický transfer neprobíhá";
     h += "</p></div>";
+
     bool todayValid = false;
     const uint32_t todayKey = currentLocalDateKey(todayValid);
-    h += "<div class='status-card'><strong>Dnešní přítok studny · odhad</strong><p>";
+    h += "<div class='status-card'><strong>Přítok do studny</strong><p>";
     if (!todayValid) h += "Čeká na platný čas";
-    else if (!wellLevelValid) h += "Hladina nedostupná";
-    else h += String(inflowTracker.litersForDate(todayKey), 1) + " l";
-    h += "</p></div></div></section>";
-
+    else h += "Dnes: " + String(inflowTracker.litersForDate(todayKey), 1) + " l (odhad)";
+    if (!wellLevelValid) h += "<br><span class='warn'>Aktuální hladina nedostupná</span>";
+    h += "</p><details><summary>Historie denního přítoku</summary>";
+    h += "<p>Nedatované přírůstky: " + String(inflowTracker.undatedLiters(), 1) + " l</p><table><tr><th align='left'>Datum</th><th align='right'>Přítok</th></tr>";
+    const HWC::InflowDay* days = inflowTracker.history();
+    for (size_t i = 0; i < inflowTracker.historySize(); ++i) {
+        if (days[i].dateKey == 0) continue;
+        const uint32_t key = days[i].dateKey;
+        char dateText[11];
+        snprintf(dateText, sizeof(dateText), "%04lu-%02lu-%02lu",
+                 static_cast<unsigned long>(key / 10000U),
+                 static_cast<unsigned long>((key / 100U) % 100U),
+                 static_cast<unsigned long>(key % 100U));
+        h += "<tr><td>"; h += dateText; h += "</td><td align='right'>"; h += String(days[i].liters, 1); h += " l</td></tr>";
+    }
+    h += "</table><small>Součet zahrnuje jen kladné změny odhadovaného objemu. </small></details></div></div></section>";
     h += "<section><h3>Přečerpávání</h3>";
     if (manualActive)
         h += "<form method='post' action='/manual-valve-command'><button class='stop' name='command' value='close' type='submit'>STOP · zavřít ventily</button></form>";
@@ -1151,29 +1167,6 @@ void handleRoot() {
         }
     }
     h += "<small>Historie ukládá výsledky řízení; objem je odhad ze změny hladiny dolní nádrže, nikoli měření průtokoměrem.</small></section>";
-    h += "<section><h3>Denní přítok studny</h3>";
-    if (todayValid) {
-        char todayText[11];
-        snprintf(todayText, sizeof(todayText), "%04lu-%02lu-%02lu",
-                 static_cast<unsigned long>(todayKey / 10000U),
-                 static_cast<unsigned long>((todayKey / 100U) % 100U),
-                 static_cast<unsigned long>(todayKey % 100U));
-        h += "<p>Dnes ("; h += todayText; h += "): ";
-        h += String(inflowTracker.litersForDate(todayKey), 1); h += " l</p>";
-    } else h += "<p class='warn'>Systémový čas není platný; nové přírůstky se ukládají jako nedatované.</p>";
-    h += "<p>Nedatované přírůstky: " + String(inflowTracker.undatedLiters(), 1) + " l</p><table style='width:100%;border-collapse:collapse'><tr><th align='left'>Datum</th><th align='right'>Přítok</th></tr>";
-    const HWC::InflowDay* days = inflowTracker.history();
-    for (size_t i = 0; i < inflowTracker.historySize(); ++i) {
-        if (days[i].dateKey == 0) continue;
-        const uint32_t key = days[i].dateKey;
-        char dateText[11];
-        snprintf(dateText, sizeof(dateText), "%04lu-%02lu-%02lu",
-                 static_cast<unsigned long>(key / 10000U),
-                 static_cast<unsigned long>((key / 100U) % 100U),
-                 static_cast<unsigned long>(key % 100U));
-        h += "<tr><td>"; h += dateText; h += "</td><td align='right'>"; h += String(days[i].liters, 1); h += " l</td></tr>";
-    }
-    h += "</table><small>Součet zahrnuje jen kladné změny odhadovaného objemu. Geometrický odhad není přesné měření zásoby.</small></section>";
     h += "<section><h3>Horní nádrž / ESP32 #2</h3>";
     h += "<p>ESP32 #2 samostatně hlídá horní čerpadlo proti chodu nasucho a měří teplotu vody. ESP32 #1 řídí ventily a sleduje přítok do dolní nádrže.</p></section>";
     h += "<h2>Konfigurace a servis</h2>";
@@ -1233,7 +1226,7 @@ void handleRoot() {
         else h += ETH.linkUp() ? "Čeká se na DHCP" : "Fyzický link je odpojen";
         h += "</p>";
     }
-    h += "<p>Ovládací web je dostupný přes Ethernet i Wi-Fi. REV108 Core 3 – stolní zkouška.</p>";
+    h += "<p>Ovládací web je dostupný přes Ethernet i Wi-Fi. REV109 Core 3 – stolní zkouška.</p>";
     h += apMode ? "<p>Servisní AP je zapnutý.</p>" : "<p>Servisní AP je vypnutý.</p>";
     if (apMode) {
         h += "<p>Adresa AP: " + WiFi.softAPIP().toString() + "<br>AP: <b>" + htmlEscape(apName) + "</b></p>";
@@ -2195,7 +2188,7 @@ void setup() {
         writeValveRelayLevel);
     delay(250);
     Serial.println();
-    Serial.println("HOME WATER CONTROLLER - ESP32 #1 / REV108 CORE 3 BENCH");
+    Serial.println("HOME WATER CONTROLLER - ESP32 #1 / REV109 CORE 3 BENCH");
     Serial.println("DEVELOPMENT BUILD - VALVE RELAYS AND PUMP SAFETY OUTPUTS ENABLED");
     // Relay pins were initialized OFF before the startup delay above.
     Serial.printf("Valve relay driver: %s; well GPIO=%u, upper GPIO=%u, active-high; relay board supply 5V\n",
