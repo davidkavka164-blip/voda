@@ -893,7 +893,7 @@ void appendTransferAction(String& h, const char* source, const char* title, cons
 }
 
 void appendRelayCard(String& h, const char* title, bool ready, bool energized,
-                     const char* onText, const char* offText, bool emergency = false) {
+                     const char* mode, const char* onText = nullptr, const char* offText = nullptr) {
     h += "<div class='status-card'><strong>";
     h += title;
     h += "</strong><p>";
@@ -902,9 +902,14 @@ void appendRelayCard(String& h, const char* title, bool ready, bool energized,
     } else {
         h += energized ? "<b class='relay-state relay-on'>ON</b>" :
                          "<b class='relay-state relay-off'>OFF</b>";
-        h += energized ? onText : offText;
     }
-    if (emergency) h += "<br><span class='warn'>Nouzový režim aktivní</span>";
+    h += " ";
+    h += mode;
+    const char* detail = energized ? onText : offText;
+    if (ready && detail) {
+        h += "<br>";
+        h += detail;
+    }
     h += "</p></div>";
 }
 
@@ -958,23 +963,29 @@ void handleRoot() {
     const char* upperBlocker = commonBlocker;
     if (!upperBlocker && !watchdogReady) upperBlocker = "Kontrola přítoku do dolní nádrže není nastavena.";
 
+    const char* automaticMode = "Automatický režim";
+    const char* emergencyMode = "Nouzový režim";
+    const char* valveMode = !manualActive ? automaticMode :
+        (manualValveControl.operatingMode() == HWC::MANUAL_VALVE_OPERATING_SERVICE
+            ? "Servisní režim" : emergencyMode);
+
     appendRelayCard(h, "Ventil studny", manualValveRelayOutputReady,
-        manualValveRelayOutput.wellRelayEnergized(), "Povel otevřít", "Povel zavřít");
+        manualValveRelayOutput.wellRelayEnergized(), valveMode);
     appendRelayCard(h, "Ventil horní nádrže", manualValveRelayOutputReady,
-        manualValveRelayOutput.upperRelayEnergized(), "Povel otevřít", "Povel zavřít");
+        manualValveRelayOutput.upperRelayEnergized(), valveMode);
     appendRelayCard(h, "Čerpadlo studny", wellPumpSafetyRelayReady, wellPumpSafetyRelayOutput.energized(),
+        pumpProtectionState.emergencyModeActive ? emergencyMode : automaticMode,
         "Napájení povoleno",
         !wellLevelValid ? "Chybí platná hladina." : pumpProtectionState.sensorWarning ?
         "Zkontrolujte čidlo a nastavení ochrany." : pumpProtectionState.criticalLevelLatched ?
-        "Čeká na obnovovací hladinu." : "Ochrana odebrala povolení.",
-        pumpProtectionState.emergencyModeActive);
+        "Čeká na obnovovací hladinu." : "Ochrana odebrala povolení.");
     appendRelayCard(h, "Čerpadlo dolní nádrže", lowerPumpSafetyRelayReady, lowerPumpSafetyRelayOutput.energized(),
+        lowerPumpState.emergencyModeActive ? emergencyMode : automaticMode,
         "Napájení povoleno",
         !lowerLevelValid ? "Chybí platná hladina." : lowerPumpState.sensorWarning ?
         "Zkontrolujte čidlo a nastavení ochrany." : lowerPumpState.startupValidationRequired ?
         "Čeká na ověření po startu." : lowerPumpState.criticalLevelLatched ?
-        "Čeká na obnovovací hladinu." : "Ochrana odebrala povolení.",
-        lowerPumpState.emergencyModeActive);
+        "Čeká na obnovovací hladinu." : "Ochrana odebrala povolení.");
 
     h += "<div class='status-card'><strong>Přítok do dolní nádrže</strong><p>";
     if (!lowerLevelValid) h += "<b class='warn'>Hladina nedostupná</b>";
@@ -1226,7 +1237,7 @@ void handleRoot() {
         else h += ETH.linkUp() ? "Čeká se na DHCP" : "Fyzický link je odpojen";
         h += "</p>";
     }
-    h += "<p>Ovládací web je dostupný přes Ethernet i Wi-Fi. REV109 Core 3 – stolní zkouška.</p>";
+    h += "<p>Ovládací web je dostupný přes Ethernet i Wi-Fi. REV110 Core 3 – stolní zkouška.</p>";
     h += apMode ? "<p>Servisní AP je zapnutý.</p>" : "<p>Servisní AP je vypnutý.</p>";
     if (apMode) {
         h += "<p>Adresa AP: " + WiFi.softAPIP().toString() + "<br>AP: <b>" + htmlEscape(apName) + "</b></p>";
@@ -2188,7 +2199,7 @@ void setup() {
         writeValveRelayLevel);
     delay(250);
     Serial.println();
-    Serial.println("HOME WATER CONTROLLER - ESP32 #1 / REV109 CORE 3 BENCH");
+    Serial.println("HOME WATER CONTROLLER - ESP32 #1 / REV110 CORE 3 BENCH");
     Serial.println("DEVELOPMENT BUILD - VALVE RELAYS AND PUMP SAFETY OUTPUTS ENABLED");
     // Relay pins were initialized OFF before the startup delay above.
     Serial.printf("Valve relay driver: %s; well GPIO=%u, upper GPIO=%u, active-high; relay board supply 5V\n",
